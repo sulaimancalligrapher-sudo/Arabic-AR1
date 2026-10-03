@@ -1,0 +1,11 @@
+{
+  "name": "بصيرة | Baseera Arabic AR",
+  "description": "منصة تفاعلية لتعليم اللغة العربية لغير الناطقين بها مع أنشطة تتبع حركة اليد والواقع المعزز وتكامل جداول جوجل",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
