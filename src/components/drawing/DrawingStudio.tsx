@@ -123,11 +123,16 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
   };
 
   const handleSendToWhiteboard = (item: DrawingItem, studentId: string = targetStudentId) => {
+    if (!isBoardSessionActive) {
+      setCopiedFeedback('⚠️ يرجى النقر على زر «بدء جلسة الرسم للجميع 🟢» أولاً قبل اختيار الدرس!');
+      setTimeout(() => setCopiedFeedback(null), 3500);
+      return;
+    }
     setCurrentBoardDrawingId(item.id);
     whiteboardSyncService.saveLatestDrawingId(item.id);
     whiteboardSyncService.sendDrawingToStudents(item, studentId);
     const targetLabel = studentId === 'all' ? 'جميع الطلاب 📡' : `الطالب ${connectedStudents.find(s => s.id === studentId)?.name || ''} 🎯`;
-    setCopiedFeedback(`تم إرسال «${item.title}» إلى ${targetLabel}!`);
+    setCopiedFeedback(`تم إرسال «${item.title}» إلى ${targetLabel}! 🎨`);
     setTimeout(() => setCopiedFeedback(null), 3000);
   };
 
@@ -136,9 +141,12 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
     setIsBoardSessionActive(nextState);
     if (nextState) {
       whiteboardSyncService.sendStartSession(targetStudentId);
+      setCopiedFeedback('تم بدء الجلسة للطلاب بنجاح! 🟢 يمكنك الآن اختيار أي درس وإرساله لهم.');
     } else {
       whiteboardSyncService.sendFinishSession(targetStudentId);
+      setCopiedFeedback('تم إنهاء الجلسة للطلاب وحفظ النتائج. 🔴');
     }
+    setTimeout(() => setCopiedFeedback(null), 4000);
   };
 
   const handleRemoteClearBoard = () => {
@@ -404,12 +412,22 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  handleSendToWhiteboard(item);
+                  if (!isBoardSessionActive) {
+                    setShowWhiteboardModal(true);
+                    setCopiedFeedback('⚠️ يرجى بدء الجلسة أولاً بالنقر على «بدء جلسة الرسم للجميع 🟢»!');
+                    setTimeout(() => setCopiedFeedback(null), 3500);
+                  } else {
+                    handleSendToWhiteboard(item);
+                  }
                 }}
-                className="px-2.5 py-1 rounded-lg bg-sky-950/80 hover:bg-sky-500 hover:text-slate-950 text-sky-300 border border-sky-600/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer shadow-sm"
-                title="إرسال هذه الرسمة فوراً إلى شاشة السبورة أمام الطلاب"
+                className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm ${
+                  !isBoardSessionActive
+                    ? 'bg-slate-800 text-slate-400 border-slate-700 hover:border-amber-500 hover:text-amber-300'
+                    : 'bg-sky-950/80 hover:bg-sky-500 hover:text-slate-950 text-sky-300 border-sky-600/40'
+                }`}
+                title={!isBoardSessionActive ? 'يجب بدء الجلسة أولاً قبل إرسال الدروس' : 'إرسال هذه الرسمة فوراً إلى شاشة السبورة أمام الطلاب'}
               >
-                <Cast className="w-3.5 h-3.5 text-sky-400" />
+                {!isBoardSessionActive ? <Lock className="w-3 h-3 text-amber-400" /> : <Cast className="w-3.5 h-3.5 text-sky-400" />}
                 <span>عرض بالسبورة 📡</span>
               </button>
 
@@ -827,18 +845,43 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
 
             {/* Quick Template Broadcast list */}
             <div>
-              <div className="text-xs font-bold text-slate-300 mb-2">
-                اختر الرسمة أو الحرف لإرسالها فوراً إلى أجهزة الطلاب ({targetStudentId === 'all' ? 'للجميع 📡' : 'للطالب المحدد 🎯'}):
+              <div className="flex items-center justify-between text-xs font-bold text-slate-300 mb-2">
+                <span>
+                  اختر الرسمة أو الحرف لإرسالها فوراً إلى أجهزة الطلاب ({targetStudentId === 'all' ? 'للجميع 📡' : 'للطالب المحدد 🎯'}):
+                </span>
+                {!isBoardSessionActive && (
+                  <span className="text-[11px] text-amber-400 font-bold flex items-center gap-1">
+                    <Lock className="w-3.5 h-3.5" />
+                    <span>مقفلة حتى بدء الجلسة</span>
+                  </span>
+                )}
               </div>
+
+              {!isBoardSessionActive && (
+                <div className="p-3 rounded-2xl bg-amber-950/60 border border-amber-500/40 text-amber-200 text-xs font-bold flex items-center gap-2 mb-2.5 shadow-inner">
+                  <Lock className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>خطوة 1: انقر على زر «بدء جلسة الرسم للجميع 🟢» أعلاه أولاً لتفعيل إرسال الدروس للطلاب.</span>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 max-h-44 overflow-y-auto p-1">
                 {allDrawings.slice(0, 8).map((item) => (
                   <button
                     key={item.id}
+                    disabled={!isBoardSessionActive}
                     onClick={() => handleSendToWhiteboard(item)}
-                    className="p-2 rounded-xl bg-slate-800/60 hover:bg-sky-950/80 border border-slate-700/80 hover:border-sky-500/50 text-right flex items-center justify-between transition-colors cursor-pointer"
+                    className={`p-2.5 rounded-xl border text-right flex items-center justify-between transition-all ${
+                      !isBoardSessionActive
+                        ? 'opacity-40 cursor-not-allowed bg-slate-900 border-slate-800 text-slate-500'
+                        : 'bg-slate-800/80 hover:bg-sky-950 border-slate-700/80 hover:border-sky-500 text-white cursor-pointer shadow-sm hover:scale-102'
+                    }`}
                   >
-                    <span className="text-xs font-bold text-white font-serif truncate">{item.title}</span>
-                    <Cast className="w-3.5 h-3.5 text-sky-400 shrink-0 mr-1" />
+                    <span className="text-xs font-bold font-serif truncate">{item.title}</span>
+                    {!isBoardSessionActive ? (
+                      <Lock className="w-3.5 h-3.5 text-slate-500 shrink-0 mr-1" />
+                    ) : (
+                      <Cast className="w-3.5 h-3.5 text-sky-400 shrink-0 mr-1" />
+                    )}
                   </button>
                 ))}
               </div>

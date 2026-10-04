@@ -26,7 +26,8 @@ import {
   Clock,
   ArrowRight,
   ShieldCheck,
-  Hash
+  Hash,
+  PenTool
 } from 'lucide-react';
 
 interface StudentWhiteboardViewProps {
@@ -120,6 +121,15 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
   const [isPenDown, setIsPenDown] = useState(false);
   const isPenDownRef = useRef(false);
   const [isMobileDevice, setIsMobileDevice] = useState(false);
+
+  // Input Method: 'hand' (AI Camera tracking) vs 'touch_mouse' (Pure Whiteboard Direct Drawing)
+  const [inputMethod, setInputMethod] = useState<'hand' | 'touch_mouse'>('hand');
+  const inputMethodRef = useRef<'hand' | 'touch_mouse'>('hand');
+  inputMethodRef.current = inputMethod;
+
+  // Teacher remote session gate state
+  const [teacherSessionStarted, setTeacherSessionStarted] = useState(false);
+  const isPointerDownRef = useRef(false);
 
   // In-canvas button tracking
   const [isHoveringButton, setIsHoveringButton] = useState(false);
@@ -271,6 +281,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
         if (found) {
           setCurrentDrawing(found);
           clearCanvas();
+          setTeacherSessionStarted(true);
           setFlowState('drawing');
           startDrawingSession();
           if (found.arabicAudioText) {
@@ -278,9 +289,11 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
           }
         }
       } else if (msg.type === 'START_SESSION') {
-        setFlowState('drawing');
-        startDrawingSession();
+        setTeacherSessionStarted(true);
+        audioService.playChime();
+        audioService.speakArabic('بدأ المعلم الجلسة! في انتظار اختيار الدرس 🚀');
       } else if (msg.type === 'FINISH_SESSION') {
+        setTeacherSessionStarted(false);
         finishDrawingSession();
       } else if (msg.type === 'CLEAR_BOARD') {
         clearCanvas();
@@ -335,20 +348,27 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     };
   }, [currentDrawing.id, currentDrawing.imageUrl, flowState, guideColor, videoDims.width, videoDims.height]);
 
-  // Re-render guide canvas when color or opacity changes
+  // Re-render guide canvas when color, opacity, or inputMethod changes
   useEffect(() => {
     if (guideCanvasRef.current && analysisRef.current) {
       const colorOpt = GUIDE_LINE_COLORS.find((c) => c.id === guideColor) || GUIDE_LINE_COLORS[0];
+      const effectiveHex = inputMethod === 'touch_mouse'
+        ? (guideColor === 'white' || guideColor === 'yellow' ? '#1e293b' : colorOpt.hex)
+        : colorOpt.hex;
+      const effectiveOpacity = inputMethod === 'touch_mouse'
+        ? 0.55
+        : (currentDrawing.opacity || 0.35);
+
       drawingEngineService.renderGuideToCanvas(
         guideCanvasRef.current,
         analysisRef.current.targetMask,
         analysisRef.current.width,
         analysisRef.current.height,
-        colorOpt.hex,
-        currentDrawing.opacity || 0.35
+        effectiveHex,
+        effectiveOpacity
       );
     }
-  }, [guideColor, currentDrawing.opacity]);
+  }, [guideColor, currentDrawing.opacity, inputMethod]);
 
   // Handle dynamic video metadata to adapt to orientation changes instantly
   const handleVideoLoadedMetadata = () => {
@@ -557,6 +577,48 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     }
   }, [brushColor, brushSize, currentDrawing.id, currentDrawing.title, currentDrawing.tolerance]);
 
+  // Pointer & mouse events for Pure Whiteboard direct drawing mode (Stylus, Finger, Mouse)
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (inputMethodRef.current !== 'touch_mouse') return;
+    if (!isSessionActiveRef.current || isFinishedRef.current || !userDrawCanvasRef.current) return;
+    isPointerDownRef.current = true;
+    setIsPenDown(true);
+    try {
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {}
+
+    const canvas = userDrawCanvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const px = (e.clientX - rect.left) * scaleX;
+    const py = (e.clientY - rect.top) * scaleY;
+    processDrawPoint(px, py);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (inputMethodRef.current !== 'touch_mouse') return;
+    if (!isPointerDownRef.current || !isSessionActiveRef.current || isFinishedRef.current || !userDrawCanvasRef.current) return;
+
+    const canvas = userDrawCanvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const px = (e.clientX - rect.left) * scaleX;
+    const py = (e.clientY - rect.top) * scaleY;
+    processDrawPoint(px, py);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (inputMethodRef.current !== 'touch_mouse') return;
+    isPointerDownRef.current = false;
+    setIsPenDown(false);
+    lastDrawPosRef.current = null;
+    try {
+      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {}
+  };
+
   // Touch & stylus support for tablets & mobile
   const handleTouchDraw = (e: React.TouchEvent<HTMLCanvasElement>) => {
     if (!isSessionActiveRef.current || isFinishedRef.current || !userDrawCanvasRef.current) return;
@@ -575,11 +637,24 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
 
   const handleTouchEnd = () => {
     lastDrawPosRef.current = null;
+    if (inputMethodRef.current === 'touch_mouse') {
+      setIsPenDown(false);
+    }
   };
 
   // Hand tracking update callback with Smart Latch logic
   const handleHandUpdate = useCallback((data: HandData) => {
     if (!stageFrameRef.current || !analysisRef.current) return;
+
+    // If student is in touch_mouse Whiteboard mode, disable hand drawing
+    if (inputMethodRef.current === 'touch_mouse') {
+      if (skeletonCanvasRef.current) {
+        const cvs = skeletonCanvasRef.current;
+        const ctx = cvs.getContext('2d');
+        ctx?.clearRect(0, 0, cvs.width, cvs.height);
+      }
+      return;
+    }
 
     const currentMode = gestureModeRef.current;
     const hasHand = !!data.indexTip;
@@ -958,14 +1033,53 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             </div>
           )}
 
-          {/* Toggle Video Feed */}
+          {/* Toggle Input Method: Hand Tracking vs Whiteboard Touch/Mouse */}
           <button
-            onClick={() => setShowVideo(!showVideo)}
-            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs"
-            title={showVideo ? 'إخفاء كاميرا الخلفية' : 'إظهار كاميرا الخلفية'}
+            onClick={() => {
+              const nextMethod = inputMethod === 'hand' ? 'touch_mouse' : 'hand';
+              setInputMethod(nextMethod);
+              if (nextMethod === 'touch_mouse') {
+                audioService.speakArabic('السبورة البيضاء: يمكنك الآن الرسم باللمس أو بالفأرة');
+              } else {
+                audioService.speakArabic('وضع تتبع حركة اليد أمام الكاميرا');
+              }
+            }}
+            className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer ${
+              inputMethod === 'touch_mouse'
+                ? 'bg-amber-400 text-slate-950 border-amber-300 font-extrabold shadow-amber-500/25 ring-2 ring-amber-400/30'
+                : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700'
+            }`}
+            title={
+              inputMethod === 'touch_mouse'
+                ? 'التبديل إلى تتبع حركة اليد أمام الكاميرا ✋'
+                : 'التبديل إلى السبورة البيضاء والرسم باللمس أو الماوس 🖌️'
+            }
           >
-            {showVideo ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+            {inputMethod === 'touch_mouse' ? (
+              <>
+                <Hand className="w-3.5 h-3.5 text-slate-950" />
+                <span className="hidden sm:inline">حركة اليد ✋</span>
+                <span className="sm:hidden">يد</span>
+              </>
+            ) : (
+              <>
+                <PenTool className="w-3.5 h-3.5 text-amber-400" />
+                <span className="hidden sm:inline">سبورة بيضاء (لمس / ماوس) 🖌️</span>
+                <span className="sm:hidden">لمس/ماوس</span>
+              </>
+            )}
           </button>
+
+          {/* Toggle Video Feed (only in hand mode) */}
+          {inputMethod === 'hand' && (
+            <button
+              onClick={() => setShowVideo(!showVideo)}
+              className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs"
+              title={showVideo ? 'إخفاء كاميرا الخلفية' : 'إظهار كاميرا الخلفية'}
+            >
+              {showVideo ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+            </button>
+          )}
 
           {/* Clear board (only when drawing) */}
           {flowState === 'drawing' && (
@@ -997,18 +1111,22 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
           isMobileDevice ? 'p-0 sm:p-1' : 'p-0'
         }`}
       >
-        {/* Dynamic Aspect-Ratio Frame: Exact pixel fit with no stretching or distortion */}
+        {/* Dynamic Aspect-Ratio Frame: Pure Whiteboard or Dark AR Camera */}
         <div
           ref={stageFrameRef}
           style={{
             width: `${stageDimensions.width}px`,
             height: `${stageDimensions.height}px`
           }}
-          className={`relative overflow-hidden bg-slate-950 border border-slate-800 shadow-2xl flex items-center justify-center transition-all duration-150 ${
+          className={`relative overflow-hidden transition-all duration-300 flex items-center justify-center ${
+            inputMethod === 'touch_mouse'
+              ? 'bg-white border-4 border-slate-300 shadow-2xl'
+              : 'bg-slate-950 border border-slate-800 shadow-2xl'
+          } ${
             isMobileDevice ? 'rounded-xl sm:rounded-2xl' : 'rounded-none sm:rounded-xl'
           }`}
         >
-          {/* Layer 1: Mirror Video Camera Feed (True-to-life native aspect ratio, never squished!) */}
+          {/* Layer 1: Mirror Video Camera Feed (Visible only in Hand Tracking mode) */}
           <video
             ref={videoRef}
             playsInline
@@ -1016,7 +1134,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             onLoadedMetadata={handleVideoLoadedMetadata}
             onResize={handleVideoLoadedMetadata}
             className={`absolute inset-0 w-full h-full object-contain -scale-x-100 transition-opacity duration-300 pointer-events-none ${
-              showVideo ? 'opacity-90' : 'opacity-0'
+              showVideo && inputMethod === 'hand' ? 'opacity-90' : 'opacity-0'
             }`}
             style={{
               filter: 'brightness(1.35) contrast(1.15) saturate(1.15)'
@@ -1032,7 +1150,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
               className="absolute inset-0 w-full h-full object-contain pointer-events-none z-10 transition-all duration-200"
               style={{
                 filter:
-                  guideColor === 'yellow'
+                  inputMethod === 'touch_mouse'
+                    ? 'drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25))'
+                    : guideColor === 'yellow'
                     ? 'drop-shadow(0 0 8px rgba(250, 204, 21, 0.9)) drop-shadow(0 0 16px rgba(234, 179, 8, 0.5))'
                     : guideColor === 'green'
                     ? 'drop-shadow(0 0 8px rgba(74, 222, 128, 0.9)) drop-shadow(0 0 16px rgba(34, 197, 94, 0.5))'
@@ -1045,24 +1165,32 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             />
           )}
 
-          {/* Layer 3: Student Live Drawing Canvas */}
+          {/* Layer 3: Student Live Drawing Canvas (Universal Touch, Pointer & Mouse Drag) */}
           {flowState === 'drawing' && (
             <canvas
               ref={userDrawCanvasRef}
               width={videoDims.width}
               height={videoDims.height}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
               onTouchMove={handleTouchDraw}
               onTouchEnd={handleTouchEnd}
-              className="absolute inset-0 w-full h-full object-contain cursor-crosshair z-20 touch-none"
+              className={`absolute inset-0 w-full h-full object-contain cursor-crosshair z-20 touch-none ${
+                inputMethod === 'touch_mouse' ? 'pointer-events-auto' : ''
+              }`}
             />
           )}
 
-          {/* Layer 4: Aligned Hand Skeleton Canvas */}
+          {/* Layer 4: Aligned Hand Skeleton Canvas (Only active in Hand tracking mode) */}
           <canvas
             ref={skeletonCanvasRef}
             width={videoDims.width}
             height={videoDims.height}
-            className="absolute inset-0 w-full h-full object-contain pointer-events-none z-30"
+            className={`absolute inset-0 w-full h-full object-contain pointer-events-none z-30 ${
+              inputMethod === 'touch_mouse' ? 'hidden' : 'block'
+            }`}
           />
 
           {/* Interactive In-Canvas Button (Start / Finish Session - only when in drawing mode) */}
@@ -1102,7 +1230,11 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
                   {!isSessionActive ? 'ابدأ الرسم الآن' : 'إنهاء وحفظ النتيجة'}
                 </div>
                 <div className="text-[9px] sm:text-[10px] text-slate-400 mt-0.5">
-                  {!isSessionActive ? 'اقبض بإصبعين 🤏 للنقر' : 'اضغط للنهاية والاحتفال'}
+                  {!isSessionActive
+                    ? inputMethod === 'touch_mouse'
+                      ? 'انقر للبدء 🚀'
+                      : 'اقبض بإصبعين 🤏 للنقر'
+                    : 'اضغط للنهاية والاحتفال'}
                 </div>
               </div>
             </button>
@@ -1111,7 +1243,21 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
           {/* Smart Latch Drawing Status Badge */}
           {flowState === 'drawing' && isSessionActive && (
             <div className="absolute top-3 sm:top-4 left-3 sm:left-4 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border text-xs font-bold transition-all shadow-xl select-none bg-slate-900/90 border-slate-700">
-              {isPenDown ? (
+              {inputMethod === 'touch_mouse' ? (
+                isPenDown ? (
+                  <span className="flex items-center gap-1.5 text-emerald-400">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
+                    <PenTool className="w-3.5 h-3.5" />
+                    <span className="text-[11px] sm:text-xs">جاري الرسم باللمس / الفأرة 🖌️</span>
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1.5 text-sky-300">
+                    <span className="w-2.5 h-2.5 rounded-full bg-sky-400" />
+                    <PenTool className="w-3.5 h-3.5" />
+                    <span className="text-[11px] sm:text-xs">المس الشاشة أو اسحب بالفأرة للرسم 🖌️</span>
+                  </span>
+                )
+              ) : isPenDown ? (
                 <span className="flex items-center gap-1.5 text-emerald-400">
                   <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
                   <Lock className="w-3.5 h-3.5" />
@@ -1156,29 +1302,32 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
                 <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
                   <p className="text-sm font-bold text-sky-300 flex items-center justify-center gap-2">
                     <Radio className="w-4 h-4 animate-pulse text-sky-400" />
-                    <span>في انتظار المعلم لبدء الجلسة واختيار الدرس...</span>
+                    <span>
+                      {teacherSessionStarted
+                        ? '🟢 بدأ المعلم الجلسة بنجاح! في انتظار تحديد الدرس...'
+                        : 'في انتظار المعلم لبدء الجلسة... ⏳'}
+                    </span>
                   </p>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    بمجرد أن يبدأ المعلم الجلسة ويحدد الرسمة من لوحة التحكم، ستظهر أمامك على الفور وتبدأ في الرسم والتلوين 🎨
+                    {teacherSessionStarted
+                      ? 'الجلسة نشطة الآن! ثوانٍ معدودة وسيحدد المعلم الدرس لتظهر أمامك اللوحة فوراً وتبدأ بالرسم 🎨'
+                      : 'بمجرد أن يبدأ المعلم الجلسة ويحدد الرسمة من لوحة التحكم، ستظهر أمامك على الفور وتبدأ في الرسم والتلوين 🎨'}
                   </p>
                 </div>
 
-                <div className="flex items-center justify-center gap-2 text-[11px] text-emerald-400 font-bold bg-slate-950/60 py-2 rounded-xl border border-slate-800/80">
-                  <Camera className="w-3.5 h-3.5" />
-                  <span>الكاميرا وتتبع اليد قيد الجاهزية والعمل 🟢</span>
+                <div className="flex items-center justify-center gap-2 text-[11px] text-emerald-400 font-bold bg-slate-950/60 py-2.5 rounded-xl border border-slate-800/80">
+                  {teacherSessionStarted ? (
+                    <>
+                      <Sparkles className="w-4 h-4 text-amber-400 animate-spin" />
+                      <span className="text-amber-300">الجلسة بدأت! المعلم يختار الدرس الآن 🚀</span>
+                    </>
+                  ) : (
+                    <>
+                      <Clock className="w-3.5 h-3.5 text-sky-400" />
+                      <span>الغرفة متصلة وجاهزة، في انتظار إشارة المعلم 🟢</span>
+                    </>
+                  )}
                 </div>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFlowState('drawing');
-                    startDrawingSession();
-                  }}
-                  className="w-full py-3.5 px-6 rounded-2xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-slate-950 font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-xl shadow-emerald-500/25 transition-all transform active:scale-95 cursor-pointer mt-2"
-                >
-                  <Play className="w-4 h-4 fill-current" />
-                  <span>ابدأ الرسم الآن (أو انتظر المعلم) 🚀</span>
-                </button>
               </div>
             </div>
           )}
