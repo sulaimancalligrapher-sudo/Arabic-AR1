@@ -161,25 +161,25 @@ class HandTrackingService {
     this.sensitivity = level;
     if (level === 'easy') {
       this.pinchOnThreshold = 0.115;
-      this.pinchOffThreshold = 0.15;
-      this.threeFingerOnThreshold = 0.075;
-      this.threeFingerOffThreshold = 0.092;
-      this.threeFingerOnRatio = 0.52;
-      this.threeFingerOffRatio = 0.60;
+      this.pinchOffThreshold = 0.16;
+      this.threeFingerOnThreshold = 0.085;
+      this.threeFingerOffThreshold = 0.15;
+      this.threeFingerOnRatio = 0.56;
+      this.threeFingerOffRatio = 0.85;
     } else if (level === 'normal') {
-      this.pinchOnThreshold = 0.09;
-      this.pinchOffThreshold = 0.125;
-      this.threeFingerOnThreshold = 0.060;
-      this.threeFingerOffThreshold = 0.076;
-      this.threeFingerOnRatio = 0.42;
-      this.threeFingerOffRatio = 0.50;
+      this.pinchOnThreshold = 0.095;
+      this.pinchOffThreshold = 0.135;
+      this.threeFingerOnThreshold = 0.075;
+      this.threeFingerOffThreshold = 0.135;
+      this.threeFingerOnRatio = 0.48;
+      this.threeFingerOffRatio = 0.78;
     } else {
-      this.pinchOnThreshold = 0.07;
-      this.pinchOffThreshold = 0.10;
-      this.threeFingerOnThreshold = 0.048;
-      this.threeFingerOffThreshold = 0.062;
-      this.threeFingerOnRatio = 0.35;
-      this.threeFingerOffRatio = 0.42;
+      this.pinchOnThreshold = 0.075;
+      this.pinchOffThreshold = 0.11;
+      this.threeFingerOnThreshold = 0.065;
+      this.threeFingerOffThreshold = 0.12;
+      this.threeFingerOnRatio = 0.42;
+      this.threeFingerOffRatio = 0.70;
     }
   }
 
@@ -296,14 +296,12 @@ class HandTrackingService {
         this.hands.onResults((results: any) => this.processResults(results));
       }
 
-      // 3. Direct Native getUserMedia with natural orientation
-      // Mobile portrait uses height > width, desktop uses width > height.
-      const isPortrait = typeof window !== 'undefined' && window.innerHeight > window.innerWidth;
+      // 3. Fast, smooth camera capture with capped resolution (avoids lagging/heating on tablets & mobile)
       const constraints: MediaStreamConstraints = {
         video: {
           facingMode: 'user',
-          width: isPortrait ? { ideal: 720 } : { ideal: 1280 },
-          height: isPortrait ? { ideal: 1280 } : { ideal: 720 },
+          width: { ideal: 640 },
+          height: { ideal: 480 },
           frameRate: { ideal: 30, max: 30 }
         },
         audio: false
@@ -315,7 +313,7 @@ class HandTrackingService {
       this.videoElement.setAttribute('playsinline', 'true');
       this.videoElement.setAttribute('webkit-playsinline', 'true');
 
-      // Wait until video metadata is loaded so natural videoWidth & videoHeight are known
+      // Wait until video metadata is loaded
       await new Promise<void>((resolve) => {
         if (this.videoElement!.videoWidth > 0 && this.videoElement!.videoHeight > 0) {
           resolve();
@@ -326,17 +324,23 @@ class HandTrackingService {
 
       await this.videoElement.play();
 
-      const vWidth = this.videoElement.videoWidth || (isPortrait ? 480 : 640);
-      const vHeight = this.videoElement.videoHeight || (isPortrait ? 640 : 480);
-      this.videoDimensions = {
-        width: vWidth,
-        height: vHeight,
-        aspect: vWidth / vHeight
+      const updateDims = () => {
+        if (!this.videoElement) return;
+        const vWidth = this.videoElement.videoWidth || 640;
+        const vHeight = this.videoElement.videoHeight || 480;
+        this.videoDimensions = {
+          width: vWidth,
+          height: vHeight,
+          aspect: vWidth / vHeight
+        };
       };
+
+      updateDims();
+      this.videoElement.addEventListener('resize', updateDims);
 
       this.isRunning = true;
 
-      // Efficient frame loop using requestVideoFrameCallback when available
+      // Efficient frame loop with zero queue backlog
       const processLoop = async () => {
         if (!this.isRunning || !this.videoElement || !this.hands) return;
 
@@ -466,12 +470,12 @@ class HandTrackingService {
         }
       }
 
-      // 2. Three-Finger Pen Grip (Thumb + Index + Middle) - Used for drawing ✍️
-      const dxIndexMiddle = (targetX - middleX) * aspect;
+      // 2. Three-Finger Pen Grip (Thumb + Index + Middle) - For holding a pen & drawing ✍️
+      const dxIndexMiddle = targetX - middleX;
       const dyIndexMiddle = targetY - middleY;
       const distIndexMiddle = Math.sqrt(dxIndexMiddle * dxIndexMiddle + dyIndexMiddle * dyIndexMiddle);
 
-      const dxThumbMiddle = (thumbX - middleX) * aspect;
+      const dxThumbMiddle = thumbX - middleX;
       const dyThumbMiddle = thumbY - middleY;
       const distThumbMiddle = Math.sqrt(dxThumbMiddle * dxThumbMiddle + dyThumbMiddle * dyThumbMiddle);
 
@@ -479,24 +483,17 @@ class HandTrackingService {
       const threeFingerSpread = Math.max(rawDistance, distIndexMiddle, distThumbMiddle);
       const threeFingerRatio = threeFingerSpread / palmWidth;
 
-      // Centroid of the 3 fingertips (natural virtual pen position)
+      // Centroid of the 3 fingertips
       const rawCentroidX = (thumbX + targetX + middleX) / 3;
       const rawCentroidY = (thumbY + targetY + middleY) / 3;
       this.smoothedCentroidX += (rawCentroidX - this.smoothedCentroidX) * 0.40;
       this.smoothedCentroidY += (rawCentroidY - this.smoothedCentroidY) * 0.40;
 
-      // 3-Finger Pen Grip Hysteresis:
-      // To start drawing: ALL 3 fingers must be joined together into a true pen grip
-      const isCurrentlyClose3 = threeFingerSpread < this.threeFingerOnThreshold && threeFingerRatio < this.threeFingerOnRatio;
+      // When the 3 fingers join together:
+      const isCurrentlyClose3 = threeFingerSpread < this.threeFingerOnThreshold || threeFingerRatio < this.threeFingerOnRatio;
 
-      // To stop drawing: Opening fingers or lifting the pen releases
-      const isCurrentlyFar3 = threeFingerSpread > this.threeFingerOffThreshold || threeFingerRatio > this.threeFingerOffRatio;
-
-      // Explicit Open Hand: User deliberately spreading fingers wide to stop drawing ✋
-      const isOpenHandSpread =
-        threeFingerSpread > this.threeFingerOffThreshold * 1.35 ||
-        threeFingerRatio > this.threeFingerOffRatio * 1.3 ||
-        (rawMiddle.y < (landmarks[10]?.y ?? 0) && rawRing.y < (landmarks[14]?.y ?? 0) && rawPinky.y < (landmarks[18]?.y ?? 0));
+      // When the 3 fingers spread apart:
+      const isCurrentlyFar3 = threeFingerSpread > this.threeFingerOffThreshold && threeFingerRatio > this.threeFingerOffRatio;
 
       if (this.currentThreeFingerState) {
         if (isCurrentlyFar3) {
@@ -510,17 +507,17 @@ class HandTrackingService {
 
       this.lastHandSeenTime = Date.now();
 
-      // Smart Latch State Machine (Drawing Lock ON / OFF)
-      // When user joins fingers: Lock is activated (ON).
-      // Even if camera briefly loses a finger or hand tilts, drawing stays locked ON!
-      // Unlocks (OFF) ONLY when user spreads fingers wide into open hand.
+      // Smart Latch State Machine (Rule requested by user):
+      // 1. When 3 fingers join -> starts drawing and locks ON.
+      // 2. Tracks finger movement: even if a finger disappears from the camera, drawing DOES NOT STOP.
+      // 3. Drawing stops ONLY when the 3 fingers spread apart.
       if (this.drawingGestureMode === 'three_finger_latch') {
         if (!this.isLatched) {
           if (isCurrentlyClose3) {
             this.isLatched = true;
           }
         } else {
-          if (isOpenHandSpread) {
+          if (isCurrentlyFar3) {
             this.isLatched = false;
           }
         }
@@ -530,7 +527,7 @@ class HandTrackingService {
             this.isLatched = true;
           }
         } else {
-          if (isOpenHandSpread) {
+          if (isCurrentlyFar2) {
             this.isLatched = false;
           }
         }
@@ -542,10 +539,8 @@ class HandTrackingService {
         this.isLatched = true;
       }
 
-      // Active Draw Point: Resilient centroid or index tip fallback if a finger is occluded
-      const activeDrawPoint = (this.currentThreeFingerState && this.smoothedCentroidX)
-        ? { x: this.smoothedCentroidX, y: this.smoothedCentroidY }
-        : { x: this.smoothedX, y: this.smoothedY };
+      // Active Draw Point: Always resilient index tip (never drops even if other fingers occluded)
+      const activeDrawPoint = { x: this.smoothedX, y: this.smoothedY };
 
       // 3. Gesture Classification
       let gesture: 'pointing' | 'two_finger_pinch' | 'three_finger_pen' | 'open_hand' | 'no_hand' = 'open_hand';

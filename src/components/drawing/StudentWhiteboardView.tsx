@@ -327,6 +327,20 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     }
   }, [guideColor, currentDrawing.opacity]);
 
+  // Handle dynamic video metadata to adapt to orientation changes instantly
+  const handleVideoLoadedMetadata = () => {
+    if (!videoRef.current) return;
+    const vw = videoRef.current.videoWidth;
+    const vh = videoRef.current.videoHeight;
+    if (vw > 0 && vh > 0) {
+      setVideoDims({
+        width: vw,
+        height: vh,
+        aspect: vw / vh
+      });
+    }
+  };
+
   // Setup camera & MediaPipe tracking ONCE when joining (persists across waiting and drawing)
   useEffect(() => {
     if (flowState === 'gate') return;
@@ -340,14 +354,15 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       await handTrackingService.startTracking(videoRef.current, (data: HandData) => {
         if (!mounted) return;
 
-        // Dynamically update dimensions to match natural camera stream with ZERO squishing!
-        if (data.videoDimensions && data.videoDimensions.width > 0) {
-          if (
-            data.videoDimensions.width !== videoDims.width ||
-            data.videoDimensions.height !== videoDims.height
-          ) {
-            setVideoDims(data.videoDimensions);
-          }
+        // Dynamically update dimensions using functional state updater
+        const dims = data.videoDimensions;
+        if (dims && dims.width > 0) {
+          setVideoDims((prev) => {
+            if (prev.width !== dims.width || prev.height !== dims.height) {
+              return dims;
+            }
+            return prev;
+          });
         }
 
         handleHandUpdate(data);
@@ -561,7 +576,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       return;
     }
 
-    // 1. Virtual Start / Finish Button Hit-Test
+    // 1. Virtual Start / Finish Button Hit-Test (visual hover highlight only, no in-air click to prevent accidental finish!)
     let isOverButton = false;
     if (actionButtonRef.current && data.indexTip) {
       const btn = actionButtonRef.current;
@@ -573,31 +588,20 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
         const tipScreenY = cvsRect.top + data.indexTip.y * cvsRect.height;
 
         isOverButton = (
-          tipScreenX >= btnRect.left - 18 &&
-          tipScreenX <= btnRect.right + 18 &&
-          tipScreenY >= btnRect.top - 18 &&
-          tipScreenY <= btnRect.bottom + 18
+          tipScreenX >= btnRect.left - 10 &&
+          tipScreenX <= btnRect.right + 10 &&
+          tipScreenY >= btnRect.top - 10 &&
+          tipScreenY <= btnRect.bottom + 10
         );
       }
-
       setIsHoveringButton(isOverButton);
-
-      // 2-Finger Pinch Click on Button
-      if (isOverButton && data.isPinching) {
-        const now = Date.now();
-        if (now - lastButtonTriggerRef.current > 800) {
-          lastButtonTriggerRef.current = now;
-          audioService.playPopSound();
-          handleToggleButton();
-        }
-      }
     } else {
       setIsHoveringButton(false);
     }
 
     // 2. Smart Latch Drawing State
     let isDrawing = false;
-    if (isSessionActiveRef.current && !isOverButton) {
+    if (isSessionActiveRef.current) {
       if (currentMode === 'three_finger_latch' || currentMode === 'two_finger_latch') {
         isDrawing = !!data.isLatched;
       } else if (currentMode === 'three_finger_pinch') {
@@ -700,49 +704,32 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             ctx.fill();
           }
 
-          // Virtual Button Cursor
-          if (isOverButton && data.indexTip) {
-            const px = data.indexTip.x * cvs.width;
-            const py = data.indexTip.y * cvs.height;
+          // Virtual Pen Point (Centroid or index tip fallback)
+          const activePoint = data.indexTip || data.activeDrawPoint || data.threeFingerCentroid;
+          if (activePoint) {
+            const px = activePoint.x * cvs.width;
+            const py = activePoint.y * cvs.height;
+            if (isDrawing) {
+              ctx.beginPath();
+              ctx.arc(px, py, 16, 0, Math.PI * 2);
+              ctx.fillStyle = 'rgba(16, 185, 129, 0.3)';
+              ctx.fill();
 
-            ctx.beginPath();
-            ctx.arc(px, py, 22, 0, Math.PI * 2);
-            ctx.strokeStyle = data.isPinching ? '#10b981' : '#38bdf8';
-            ctx.lineWidth = 3;
-            ctx.stroke();
-
-            ctx.font = 'bold 13px Cairo, sans-serif';
-            ctx.fillStyle = '#ffffff';
-            ctx.textAlign = 'center';
-            ctx.fillText(data.isPinching ? 'تم النقر! ✨' : 'اقبض بإصبعين 🤏', px, py - 30);
-          } else {
-            // Virtual Pen Point (Centroid or index tip fallback)
-            const activePoint = data.activeDrawPoint || data.threeFingerCentroid || data.indexTip;
-            if (activePoint) {
-              const px = activePoint.x * cvs.width;
-              const py = activePoint.y * cvs.height;
-              if (isDrawing) {
-                ctx.beginPath();
-                ctx.arc(px, py, 16, 0, Math.PI * 2);
-                ctx.fillStyle = 'rgba(16, 185, 129, 0.3)';
-                ctx.fill();
-
-                ctx.beginPath();
-                ctx.arc(px, py, 8, 0, Math.PI * 2);
-                ctx.fillStyle = brushColor;
-                ctx.strokeStyle = '#ffffff';
-                ctx.lineWidth = 3;
-                ctx.fill();
-                ctx.stroke();
-              } else {
-                ctx.beginPath();
-                ctx.arc(px, py, 12, 0, Math.PI * 2);
-                ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-                ctx.setLineDash([4, 4]);
-                ctx.lineWidth = 2;
-                ctx.stroke();
-                ctx.setLineDash([]);
-              }
+              ctx.beginPath();
+              ctx.arc(px, py, 8, 0, Math.PI * 2);
+              ctx.fillStyle = brushColor;
+              ctx.strokeStyle = '#ffffff';
+              ctx.lineWidth = 3;
+              ctx.fill();
+              ctx.stroke();
+            } else {
+              ctx.beginPath();
+              ctx.arc(px, py, 12, 0, Math.PI * 2);
+              ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+              ctx.setLineDash([4, 4]);
+              ctx.lineWidth = 2;
+              ctx.stroke();
+              ctx.setLineDash([]);
             }
           }
         }
@@ -970,6 +957,8 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             ref={videoRef}
             playsInline
             muted
+            onLoadedMetadata={handleVideoLoadedMetadata}
+            onResize={handleVideoLoadedMetadata}
             className={`absolute inset-0 w-full h-full object-contain -scale-x-100 transition-opacity duration-300 pointer-events-none ${
               showVideo ? 'opacity-90' : 'opacity-0'
             }`}
