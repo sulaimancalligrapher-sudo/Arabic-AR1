@@ -296,12 +296,14 @@ class HandTrackingService {
         this.hands.onResults((results: any) => this.processResults(results));
       }
 
-      // 3. Fast, smooth camera capture with capped resolution (avoids lagging/heating on tablets & mobile)
+      // 3. Direct camera capture:
+      // - Large desktop/PC screens: 1280x720 HD widescreen for large, expansive display with minimal margins
+      // - Mobile & Tablets: 640x480 for lightweight, smooth 30 FPS performance
       const constraints: MediaStreamConstraints = {
         video: {
           facingMode: 'user',
-          width: { ideal: 640 },
-          height: { ideal: 480 },
+          width: this.isMobileOrTablet ? { ideal: 640 } : { ideal: 1280 },
+          height: this.isMobileOrTablet ? { ideal: 480 } : { ideal: 720 },
           frameRate: { ideal: 30, max: 30 }
         },
         audio: false

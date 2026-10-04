@@ -81,16 +81,19 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
   const [gateError, setGateError] = useState<string | null>(null);
 
   // Natural Native Video Dimensions (Measured dynamically from camera stream)
-  const [videoDims, setVideoDims] = useState<{ width: number; height: number; aspect: number }>({
-    width: 640,
-    height: 480,
-    aspect: 640 / 480
+  const [videoDims, setVideoDims] = useState<{ width: number; height: number; aspect: number }>(() => {
+    if (typeof window !== 'undefined' && window.innerWidth > 840) {
+      return { width: 1280, height: 720, aspect: 1280 / 720 };
+    }
+    return { width: 640, height: 480, aspect: 640 / 480 };
   });
 
   // Computed Stage Pixel Dimensions (Guarantees zero stretching on PC, mobile portrait, and tablets)
-  const [stageDimensions, setStageDimensions] = useState<{ width: number; height: number }>({
-    width: 640,
-    height: 480
+  const [stageDimensions, setStageDimensions] = useState<{ width: number; height: number }>(() => {
+    if (typeof window !== 'undefined' && window.innerWidth > 840) {
+      return { width: 1280, height: 720 };
+    }
+    return { width: 640, height: 480 };
   });
 
   // Drawing & Session States
@@ -149,7 +152,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     setIsMobileDevice(isMobile);
   }, []);
 
-  // Update computed stage frame dimensions to fit container with MINIMAL margins and ZERO squishing
+  // Update computed stage frame dimensions:
+  // - On PC: Maximize camera size to fill the browser window with minimal margins
+  // - On Mobile/Tablet: Keep natural suitable fit
   const updateStageDimensions = useCallback(() => {
     if (!stageContainerRef.current) return;
     const container = stageContainerRef.current;
@@ -158,21 +163,39 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
 
     if (availW <= 0 || availH <= 0) return;
 
-    const targetAspect = videoDims.aspect || 640 / 480;
+    if (!isMobileDevice) {
+      // ON COMPUTER / LARGE SCREENS: Fill available height and maximize width with minimal side margins
+      const targetAspect = videoDims.aspect || (16 / 9);
+      let renderW = availW;
+      let renderH = availW / targetAspect;
 
-    let renderW = availW;
-    let renderH = availW / targetAspect;
+      if (renderH > availH) {
+        renderH = availH;
+        renderW = Math.round(availH * targetAspect);
+      }
 
-    if (renderH > availH) {
-      renderH = availH;
-      renderW = availH * targetAspect;
+      setStageDimensions({
+        width: Math.min(availW, Math.floor(renderW)),
+        height: Math.min(availH, Math.floor(renderH))
+      });
+    } else {
+      // ON MOBILE / TABLET: Keep the current suitable natural fit
+      const targetAspect = videoDims.aspect || 640 / 480;
+
+      let renderW = availW;
+      let renderH = availW / targetAspect;
+
+      if (renderH > availH) {
+        renderH = availH;
+        renderW = availH * targetAspect;
+      }
+
+      setStageDimensions({
+        width: Math.max(280, Math.floor(renderW)),
+        height: Math.max(210, Math.floor(renderH))
+      });
     }
-
-    setStageDimensions({
-      width: Math.max(280, Math.floor(renderW)),
-      height: Math.max(210, Math.floor(renderH))
-    });
-  }, [videoDims.aspect]);
+  }, [isMobileDevice, videoDims.aspect]);
 
   // Recalculate stage dimensions on resize or when video aspect changes
   useEffect(() => {
@@ -576,7 +599,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       return;
     }
 
-    // 1. Virtual Start / Finish Button Hit-Test (visual hover highlight only, no in-air click to prevent accidental finish!)
+    // 1. Virtual Start / Finish Button Hit-Test
     let isOverButton = false;
     if (actionButtonRef.current && data.indexTip) {
       const btn = actionButtonRef.current;
@@ -588,20 +611,32 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
         const tipScreenY = cvsRect.top + data.indexTip.y * cvsRect.height;
 
         isOverButton = (
-          tipScreenX >= btnRect.left - 10 &&
-          tipScreenX <= btnRect.right + 10 &&
-          tipScreenY >= btnRect.top - 10 &&
-          tipScreenY <= btnRect.bottom + 10
+          tipScreenX >= btnRect.left - 15 &&
+          tipScreenX <= btnRect.right + 15 &&
+          tipScreenY >= btnRect.top - 15 &&
+          tipScreenY <= btnRect.bottom + 15
         );
       }
       setIsHoveringButton(isOverButton);
+
+      // 2-Finger Pinch Click on Button (اقبض بإصبعين 🤏 للنقر):
+      // Allows clicking Start or Finish in the air with 2-finger pinch
+      if (isOverButton && data.isPinching) {
+        const now = Date.now();
+        if (now - lastButtonTriggerRef.current > 1000) {
+          lastButtonTriggerRef.current = now;
+          audioService.playPopSound();
+          handleToggleButton();
+        }
+      }
     } else {
       setIsHoveringButton(false);
     }
 
     // 2. Smart Latch Drawing State
+    // Pause drawing if hovering directly over the action button
     let isDrawing = false;
-    if (isSessionActiveRef.current) {
+    if (isSessionActiveRef.current && !isOverButton) {
       if (currentMode === 'three_finger_latch' || currentMode === 'two_finger_latch') {
         isDrawing = !!data.isLatched;
       } else if (currentMode === 'three_finger_pinch') {
@@ -704,32 +739,49 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             ctx.fill();
           }
 
-          // Virtual Pen Point (Centroid or index tip fallback)
-          const activePoint = data.indexTip || data.activeDrawPoint || data.threeFingerCentroid;
-          if (activePoint) {
-            const px = activePoint.x * cvs.width;
-            const py = activePoint.y * cvs.height;
-            if (isDrawing) {
-              ctx.beginPath();
-              ctx.arc(px, py, 16, 0, Math.PI * 2);
-              ctx.fillStyle = 'rgba(16, 185, 129, 0.3)';
-              ctx.fill();
+          // If hovering over button, show 2-finger pinch target cursor
+          if (isOverButton && data.indexTip) {
+            const px = data.indexTip.x * cvs.width;
+            const py = data.indexTip.y * cvs.height;
 
-              ctx.beginPath();
-              ctx.arc(px, py, 8, 0, Math.PI * 2);
-              ctx.fillStyle = brushColor;
-              ctx.strokeStyle = '#ffffff';
-              ctx.lineWidth = 3;
-              ctx.fill();
-              ctx.stroke();
-            } else {
-              ctx.beginPath();
-              ctx.arc(px, py, 12, 0, Math.PI * 2);
-              ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-              ctx.setLineDash([4, 4]);
-              ctx.lineWidth = 2;
-              ctx.stroke();
-              ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.arc(px, py, 24, 0, Math.PI * 2);
+            ctx.strokeStyle = data.isPinching ? '#10b981' : '#38bdf8';
+            ctx.lineWidth = 3.5;
+            ctx.stroke();
+
+            ctx.font = 'bold 12px Cairo, sans-serif';
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.fillText(data.isPinching ? 'تم النقر! ✨' : 'اقبض بإصبعين 🤏 للنقر', px, py - 32);
+          } else {
+            // Virtual Pen Point (Centroid or index tip fallback)
+            const activePoint = data.indexTip || data.activeDrawPoint || data.threeFingerCentroid;
+            if (activePoint) {
+              const px = activePoint.x * cvs.width;
+              const py = activePoint.y * cvs.height;
+              if (isDrawing) {
+                ctx.beginPath();
+                ctx.arc(px, py, 16, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(16, 185, 129, 0.3)';
+                ctx.fill();
+
+                ctx.beginPath();
+                ctx.arc(px, py, 8, 0, Math.PI * 2);
+                ctx.fillStyle = brushColor;
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 3;
+                ctx.fill();
+                ctx.stroke();
+              } else {
+                ctx.beginPath();
+                ctx.arc(px, py, 12, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+                ctx.setLineDash([4, 4]);
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.setLineDash([]);
+              }
             }
           }
         }
@@ -941,7 +993,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       {/* Main Drawing Stage Area (Dynamically fitted to camera stream with ZERO squishing on PC, Mobile, and Tablet) */}
       <div
         ref={stageContainerRef}
-        className="flex-1 w-full min-h-0 flex items-center justify-center p-0 sm:p-1 relative overflow-hidden bg-slate-950"
+        className={`flex-1 w-full min-h-0 flex items-center justify-center relative overflow-hidden bg-slate-950 ${
+          isMobileDevice ? 'p-0 sm:p-1' : 'p-0'
+        }`}
       >
         {/* Dynamic Aspect-Ratio Frame: Exact pixel fit with no stretching or distortion */}
         <div
@@ -950,7 +1004,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             width: `${stageDimensions.width}px`,
             height: `${stageDimensions.height}px`
           }}
-          className="relative rounded-xl sm:rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 shadow-2xl flex items-center justify-center transition-all duration-150"
+          className={`relative overflow-hidden bg-slate-950 border border-slate-800 shadow-2xl flex items-center justify-center transition-all duration-150 ${
+            isMobileDevice ? 'rounded-xl sm:rounded-2xl' : 'rounded-none sm:rounded-xl'
+          }`}
         >
           {/* Layer 1: Mirror Video Camera Feed (True-to-life native aspect ratio, never squished!) */}
           <video
@@ -1014,8 +1070,15 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             <button
               ref={actionButtonRef}
               type="button"
-              onClick={handleToggleButton}
-              className={`absolute top-3 sm:top-4 right-3 sm:right-4 z-40 px-3 sm:px-4 py-2 sm:py-2.5 rounded-2xl border-2 flex items-center gap-2.5 transition-all duration-200 cursor-pointer shadow-2xl backdrop-blur-md select-none ${
+              onClick={(e) => {
+                e.stopPropagation();
+                handleToggleButton();
+              }}
+              onTouchStart={(e) => {
+                e.stopPropagation();
+                handleToggleButton();
+              }}
+              className={`absolute top-3 sm:top-4 right-3 sm:right-4 z-50 pointer-events-auto px-3 sm:px-4 py-2 sm:py-2.5 rounded-2xl border-2 flex items-center gap-2.5 transition-all duration-200 cursor-pointer shadow-2xl backdrop-blur-md select-none ${
                 buttonFeedback
                   ? 'scale-95 ring-8 ring-amber-400 bg-amber-400 text-slate-950'
                   : !isSessionActive
@@ -1104,6 +1167,18 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
                   <Camera className="w-3.5 h-3.5" />
                   <span>الكاميرا وتتبع اليد قيد الجاهزية والعمل 🟢</span>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFlowState('drawing');
+                    startDrawingSession();
+                  }}
+                  className="w-full py-3.5 px-6 rounded-2xl bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-slate-950 font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-xl shadow-emerald-500/25 transition-all transform active:scale-95 cursor-pointer mt-2"
+                >
+                  <Play className="w-4 h-4 fill-current" />
+                  <span>ابدأ الرسم الآن (أو انتظر المعلم) 🚀</span>
+                </button>
               </div>
             </div>
           )}
