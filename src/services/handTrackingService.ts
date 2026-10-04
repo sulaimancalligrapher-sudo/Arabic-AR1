@@ -485,46 +485,9 @@ class HandTrackingService {
       };
 
       // Palm width (scale invariant reference with aspect correction)
-      const palmWidth = Math.max(0.04, dist2D(rawPinkyKnuckle, rawIndexKnuckle));
-
-      // Anatomical Finger Curl Analysis:
-      // Index finger (Knuckle: 5, PIP: 6, TIP: 8, Wrist: 0)
-      const distWristIndexTip = dist2D(rawIndex, rawWrist);
-      const distWristIndexPip = dist2D(landmarks[6], rawWrist);
-      const distKnuckleIndexTip = dist2D(rawIndex, rawIndexKnuckle);
-      const isIndexCurled = distWristIndexTip <= distWristIndexPip * 1.05 || distKnuckleIndexTip < palmWidth * 0.75;
-
-      // Middle finger (Knuckle: 9, PIP: 10, TIP: 12)
-      const distWristMiddleTip = dist2D(rawMiddle, rawWrist);
-      const distWristMiddlePip = dist2D(landmarks[10], rawWrist);
-      const distKnuckleMiddleTip = dist2D(rawMiddle, landmarks[9]);
-      const isMiddleCurled = distWristMiddleTip <= distWristMiddlePip * 1.05 || distKnuckleMiddleTip < palmWidth * 0.75;
-
-      // Ring finger (Knuckle: 13, PIP: 14, TIP: 16)
-      const distWristRingTip = dist2D(rawRing, rawWrist);
-      const distWristRingPip = dist2D(landmarks[14], rawWrist);
-      const distKnuckleRingTip = dist2D(rawRing, landmarks[13]);
-      const isRingCurled = distWristRingTip <= distWristRingPip * 1.05 || distKnuckleRingTip < palmWidth * 0.75;
-
-      // Pinky finger (Knuckle: 17, PIP: 18, TIP: 20)
-      const distWristPinkyTip = dist2D(rawPinky, rawWrist);
-      const distWristPinkyPip = dist2D(landmarks[18], rawWrist);
-      const distKnucklePinkyTip = dist2D(rawPinky, rawPinkyKnuckle);
-      const isPinkyCurled = distWristPinkyTip <= distWristPinkyPip * 1.05 || distKnucklePinkyTip < palmWidth * 0.75;
-
-      // Count curled fingers
-      const curledFingersCount = (isIndexCurled ? 1 : 0) + (isMiddleCurled ? 1 : 0) + (isRingCurled ? 1 : 0) + (isPinkyCurled ? 1 : 0);
-
-      // FIST DETECTION (فحص قبضة اليد الكاملة ✊):
-      // All 4 fingers curled, or Index + Middle + at least one other finger curled tightly:
-      const isFist = (isIndexCurled && isMiddleCurled && (isRingCurled || isPinkyCurled)) || curledFingersCount >= 3;
-
-      // When in a fist: immediately stop drawing and break latch!
-      if (isFist) {
-        this.isLatched = false;
-        this.currentThreeFingerState = false;
-        this.currentPinchState = false;
-      }
+      const palmDx = ((1 - rawPinkyKnuckle.x) - (1 - rawIndexKnuckle.x)) * aspect;
+      const palmDy = rawPinkyKnuckle.y - rawIndexKnuckle.y;
+      const palmWidth = Math.max(0.04, Math.sqrt(palmDx * palmDx + palmDy * palmDy));
 
       // 1. Two-Finger Pinch (Thumb Tip to Index Tip) - Used for grabbing/moving
       const dxThumbIndex = (thumbX - targetX) * aspect;
@@ -532,8 +495,8 @@ class HandTrackingService {
       const rawDistance = Math.sqrt(dxThumbIndex * dxThumbIndex + dyThumbIndex * dyThumbIndex);
       const pinchRatio = rawDistance / palmWidth;
 
-      const isCurrentlyClose2 = !isFist && (rawDistance < this.pinchOnThreshold || pinchRatio < 0.68);
-      const isCurrentlyFar2 = isFist || (rawDistance > this.pinchOffThreshold && pinchRatio > 0.95);
+      const isCurrentlyClose2 = rawDistance < this.pinchOnThreshold || pinchRatio < 0.68;
+      const isCurrentlyFar2 = rawDistance > this.pinchOffThreshold && pinchRatio > 0.95;
 
       if (this.currentPinchState) {
         if (isCurrentlyFar2) {
@@ -565,11 +528,11 @@ class HandTrackingService {
       this.smoothedCentroidX += (rawCentroidX - this.smoothedCentroidX) * centroidSmoothing;
       this.smoothedCentroidY += (rawCentroidY - this.smoothedCentroidY) * centroidSmoothing;
 
-      // When the 3 fingers join together (ONLY when NOT in a fist, and Index & Middle are extended in pen grip):
-      const isCurrentlyClose3 = !isFist && !isIndexCurled && !isMiddleCurled && (threeFingerSpread < this.threeFingerOnThreshold || threeFingerRatio < this.threeFingerOnRatio);
+      // When the 3 fingers join together (START condition):
+      const isCurrentlyClose3 = threeFingerSpread < this.threeFingerOnThreshold || threeFingerRatio < this.threeFingerOnRatio;
 
-      // When the 3 fingers spread apart (or if student clenches a fist):
-      const isCurrentlyFar3 = isFist || (threeFingerSpread > this.threeFingerOffThreshold && threeFingerRatio > this.threeFingerOffRatio);
+      // When the 3 fingers spread apart (STOP condition):
+      const isCurrentlyFar3 = threeFingerSpread > this.threeFingerOffThreshold && threeFingerRatio > this.threeFingerOffRatio;
 
       if (this.currentThreeFingerState) {
         if (isCurrentlyFar3) {
@@ -583,10 +546,10 @@ class HandTrackingService {
 
       this.lastHandSeenTime = Date.now();
 
-      // Smart Latch State Machine (Rule requested by user):
-      // 1. When 3 fingers join in pen grip -> starts drawing and locks ON.
-      // 2. Tracks finger movement: even if a finger disappears from the camera, drawing DOES NOT STOP.
-      // 3. Drawing stops ONLY when the 3 fingers spread apart OR when student closes a fist!
+      // Pure Smart Latch State Machine (حالة القفل والتثبيت الكاملة):
+      // 1. شرط البدء: بمجرد ضم الأصابع الـ 3 -> يُقفل وضع الرسم (isLatched = true)
+      // 2. أثناء الرسم: يستمر الرسم دون انقطاع، حتى لو التفت اليد أو اختفى إصبع بالحجب
+      // 3. شرط التوقف الوحيد: أن يفرد الطالب أصابعه الثلاثة صراحة (isCurrentlyFar3) أو خروج اليد من الكاميرا
       if (this.drawingGestureMode === 'three_finger_latch') {
         if (!this.isLatched) {
           if (isCurrentlyClose3) {
@@ -608,11 +571,11 @@ class HandTrackingService {
           }
         }
       } else if (this.drawingGestureMode === 'three_finger_pinch') {
-        this.isLatched = !isFist && this.currentThreeFingerState;
+        this.isLatched = this.currentThreeFingerState;
       } else if (this.drawingGestureMode === 'two_finger_pinch') {
-        this.isLatched = !isFist && this.currentPinchState;
+        this.isLatched = this.currentPinchState;
       } else if (this.drawingGestureMode === 'continuous') {
-        this.isLatched = !isFist;
+        this.isLatched = true;
       }
 
       // Active Draw Point: Always resilient index tip (never drops even if other fingers occluded)
@@ -620,16 +583,18 @@ class HandTrackingService {
 
       // 3. Gesture Classification
       let gesture: 'pointing' | 'two_finger_pinch' | 'three_finger_pen' | 'open_hand' | 'fist' | 'no_hand' = 'open_hand';
-      if (isFist) {
-        gesture = 'fist';
-      } else if (this.currentThreeFingerState || (this.isLatched && this.drawingGestureMode.includes('three_finger'))) {
+      if (this.currentThreeFingerState || (this.isLatched && this.drawingGestureMode.includes('three_finger'))) {
         gesture = 'three_finger_pen';
       } else if (this.currentPinchState && distIndexMiddle > 0.08) {
         gesture = 'two_finger_pinch';
-      } else if (!isIndexCurled && (isMiddleCurled || rawDistance > 0.15)) {
-        gesture = 'pointing';
       } else {
-        gesture = 'open_hand';
+        const isIndexExtended = rawIndex.y < (landmarks[6]?.y ?? 1.0);
+        const isMiddleFolded = rawMiddle.y > (landmarks[10]?.y ?? 0);
+        if (isIndexExtended && (isMiddleFolded || rawDistance > 0.15)) {
+          gesture = 'pointing';
+        } else {
+          gesture = 'open_hand';
+        }
       }
 
       this.latestData = {
@@ -650,7 +615,7 @@ class HandTrackingService {
         isThreeFingerLatched: this.isLatched,
         activeDrawPoint,
         gesture,
-        isFist,
+        isFist: false,
         landmarks: landmarks.map((pt: any) => ({ x: 1 - pt.x, y: pt.y, z: pt.z })),
         lastUpdated: Date.now(),
         fps: this.currentFps,

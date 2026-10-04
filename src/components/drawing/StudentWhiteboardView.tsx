@@ -119,8 +119,6 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
   const [showVideo, setShowVideo] = useState(true);
   const [isPenDown, setIsPenDown] = useState(false);
   const isPenDownRef = useRef(false);
-  const [isFistClosed, setIsFistClosed] = useState(false);
-  const isFistClosedRef = useRef(false);
   const [isMobileDevice, setIsMobileDevice] = useState(false);
 
   // In-canvas button tracking
@@ -635,17 +633,10 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       setIsHoveringButton(false);
     }
 
-    // Track Fist State for HUD
-    const currentIsFist = !!data.isFist;
-    if (isFistClosedRef.current !== currentIsFist) {
-      isFistClosedRef.current = currentIsFist;
-      setIsFistClosed(currentIsFist);
-    }
-
-    // 2. Smart Latch Drawing State
-    // Pause drawing if hovering directly over the action button OR if fist is closed (قبضة اليد تمنع وتوقف الرسم فوراً)
+    // 2. Pure Smart Latch Drawing State
+    // Draws continuously while isLatched is true, unless hovering directly over the action button
     let isDrawing = false;
-    if (isSessionActiveRef.current && !isOverButton && !currentIsFist) {
+    if (isSessionActiveRef.current && !isOverButton) {
       if (currentMode === 'three_finger_latch' || currentMode === 'two_finger_latch') {
         isDrawing = !!data.isLatched;
       } else if (currentMode === 'three_finger_pinch') {
@@ -1124,12 +1115,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
                 <span className="flex items-center gap-1.5 text-emerald-400">
                   <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
                   <Lock className="w-3.5 h-3.5" />
-                  <span className="text-[11px] sm:text-xs">القلم مثبّت ويرسم ✍️ (باعد أصابعك أو اقبض اليد للإيقاف)</span>
-                </span>
-              ) : isFistClosed ? (
-                <span className="flex items-center gap-1.5 text-rose-400">
-                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse" />
-                  <span className="text-[11px] sm:text-xs">قبضة اليد مغلقة ✊ (الرسم متوقف تماماً)</span>
+                  <span className="text-[11px] sm:text-xs">القلم مثبّت ويرسم ✍️ (افرد أصابعك للتوقف ✋)</span>
                 </span>
               ) : (
                 <span className="flex items-center gap-1.5 text-amber-300">
