@@ -35,7 +35,8 @@ export interface HandData {
   activeDrawPoint: { x: number; y: number } | null;
 
   // Active detected gesture
-  gesture: 'pointing' | 'two_finger_pinch' | 'three_finger_pen' | 'open_hand' | 'no_hand';
+  gesture: 'pointing' | 'two_finger_pinch' | 'three_finger_pen' | 'open_hand' | 'fist' | 'no_hand';
+  isFist: boolean;
 
   landmarks: Array<{ x: number; y: number; z: number }> | null;
   lastUpdated: number;
@@ -61,6 +62,8 @@ class HandTrackingService {
   private hands: any = null;
   private camera: any = null;
   private videoElement: HTMLVideoElement | null = null;
+  private offscreenCanvas: HTMLCanvasElement | null = null;
+  private offscreenCtx: CanvasRenderingContext2D | null = null;
   private isRunning: boolean = false;
   private callback: HandCallback | null = null;
   private isProcessingFrame: boolean = false;
@@ -125,6 +128,7 @@ class HandTrackingService {
     isThreeFingerLatched: false,
     activeDrawPoint: null,
     gesture: 'no_hand',
+    isFist: false,
     landmarks: null,
     lastUpdated: 0,
     fps: 0,
@@ -350,7 +354,31 @@ class HandTrackingService {
           this.isProcessingFrame = true;
           try {
             this.updateFps();
-            await this.hands.send({ image: this.videoElement });
+
+            if (this.isMobileOrTablet) {
+              // Solution 2: Lightweight internal processing downscale for mobile/tablet
+              // The <video> element on screen remains 100% native full size & quality!
+              // But the MediaPipe neural net processes a fast 360px feed, multiplying FPS and preventing device heat.
+              if (!this.offscreenCanvas) {
+                this.offscreenCanvas = document.createElement('canvas');
+                this.offscreenCtx = this.offscreenCanvas.getContext('2d', { willReadFrequently: false });
+              }
+              const aspect = this.videoDimensions.aspect || 1.333;
+              const procW = 360;
+              const procH = Math.max(180, Math.round(procW / aspect));
+              if (this.offscreenCanvas.width !== procW || this.offscreenCanvas.height !== procH) {
+                this.offscreenCanvas.width = procW;
+                this.offscreenCanvas.height = procH;
+              }
+              if (this.offscreenCtx) {
+                this.offscreenCtx.drawImage(this.videoElement, 0, 0, procW, procH);
+                await this.hands.send({ image: this.offscreenCanvas });
+              } else {
+                await this.hands.send({ image: this.videoElement });
+              }
+            } else {
+              await this.hands.send({ image: this.videoElement });
+            }
           } catch {
             // Ignore transient frame send error
           } finally {
@@ -441,17 +469,62 @@ class HandTrackingService {
       const wristX = 1 - rawWrist.x;
       const wristY = rawWrist.y;
 
-      // Cursor smoothing formula: cursor += (target - cursor) * 0.35
-      this.smoothedX += (targetX - this.smoothedX) * this.SMOOTHING_FACTOR;
-      this.smoothedY += (targetY - this.smoothedY) * this.SMOOTHING_FACTOR;
+      // Cursor smoothing formula:
+      // Solution 1: Snappy 0.72 factor for mobile & tablet (cursor immediately sticks to finger without dragging/lagging behind!)
+      // Desktop: 0.40 factor for buttery smooth lines
+      const smoothing = this.isMobileOrTablet ? 0.72 : 0.40;
+      this.smoothedX += (targetX - this.smoothedX) * smoothing;
+      this.smoothedY += (targetY - this.smoothedY) * smoothing;
 
       // Aspect ratio correction for true isotropic euclidean distance (prevents distortion on mobile portrait)
       const aspect = this.videoDimensions.aspect || 1;
+      const dist2D = (p1: { x: number; y: number }, p2: { x: number; y: number }) => {
+        const dx = (p1.x - p2.x) * aspect;
+        const dy = p1.y - p2.y;
+        return Math.sqrt(dx * dx + dy * dy);
+      };
 
       // Palm width (scale invariant reference with aspect correction)
-      const palmDx = ((1 - rawPinkyKnuckle.x) - (1 - rawIndexKnuckle.x)) * aspect;
-      const palmDy = rawPinkyKnuckle.y - rawIndexKnuckle.y;
-      const palmWidth = Math.max(0.04, Math.sqrt(palmDx * palmDx + palmDy * palmDy));
+      const palmWidth = Math.max(0.04, dist2D(rawPinkyKnuckle, rawIndexKnuckle));
+
+      // Anatomical Finger Curl Analysis:
+      // Index finger (Knuckle: 5, PIP: 6, TIP: 8, Wrist: 0)
+      const distWristIndexTip = dist2D(rawIndex, rawWrist);
+      const distWristIndexPip = dist2D(landmarks[6], rawWrist);
+      const distKnuckleIndexTip = dist2D(rawIndex, rawIndexKnuckle);
+      const isIndexCurled = distWristIndexTip <= distWristIndexPip * 1.05 || distKnuckleIndexTip < palmWidth * 0.75;
+
+      // Middle finger (Knuckle: 9, PIP: 10, TIP: 12)
+      const distWristMiddleTip = dist2D(rawMiddle, rawWrist);
+      const distWristMiddlePip = dist2D(landmarks[10], rawWrist);
+      const distKnuckleMiddleTip = dist2D(rawMiddle, landmarks[9]);
+      const isMiddleCurled = distWristMiddleTip <= distWristMiddlePip * 1.05 || distKnuckleMiddleTip < palmWidth * 0.75;
+
+      // Ring finger (Knuckle: 13, PIP: 14, TIP: 16)
+      const distWristRingTip = dist2D(rawRing, rawWrist);
+      const distWristRingPip = dist2D(landmarks[14], rawWrist);
+      const distKnuckleRingTip = dist2D(rawRing, landmarks[13]);
+      const isRingCurled = distWristRingTip <= distWristRingPip * 1.05 || distKnuckleRingTip < palmWidth * 0.75;
+
+      // Pinky finger (Knuckle: 17, PIP: 18, TIP: 20)
+      const distWristPinkyTip = dist2D(rawPinky, rawWrist);
+      const distWristPinkyPip = dist2D(landmarks[18], rawWrist);
+      const distKnucklePinkyTip = dist2D(rawPinky, rawPinkyKnuckle);
+      const isPinkyCurled = distWristPinkyTip <= distWristPinkyPip * 1.05 || distKnucklePinkyTip < palmWidth * 0.75;
+
+      // Count curled fingers
+      const curledFingersCount = (isIndexCurled ? 1 : 0) + (isMiddleCurled ? 1 : 0) + (isRingCurled ? 1 : 0) + (isPinkyCurled ? 1 : 0);
+
+      // FIST DETECTION (فحص قبضة اليد الكاملة ✊):
+      // All 4 fingers curled, or Index + Middle + at least one other finger curled tightly:
+      const isFist = (isIndexCurled && isMiddleCurled && (isRingCurled || isPinkyCurled)) || curledFingersCount >= 3;
+
+      // When in a fist: immediately stop drawing and break latch!
+      if (isFist) {
+        this.isLatched = false;
+        this.currentThreeFingerState = false;
+        this.currentPinchState = false;
+      }
 
       // 1. Two-Finger Pinch (Thumb Tip to Index Tip) - Used for grabbing/moving
       const dxThumbIndex = (thumbX - targetX) * aspect;
@@ -459,8 +532,8 @@ class HandTrackingService {
       const rawDistance = Math.sqrt(dxThumbIndex * dxThumbIndex + dyThumbIndex * dyThumbIndex);
       const pinchRatio = rawDistance / palmWidth;
 
-      const isCurrentlyClose2 = rawDistance < this.pinchOnThreshold || pinchRatio < 0.68;
-      const isCurrentlyFar2 = rawDistance > this.pinchOffThreshold && pinchRatio > 0.95;
+      const isCurrentlyClose2 = !isFist && (rawDistance < this.pinchOnThreshold || pinchRatio < 0.68);
+      const isCurrentlyFar2 = isFist || (rawDistance > this.pinchOffThreshold && pinchRatio > 0.95);
 
       if (this.currentPinchState) {
         if (isCurrentlyFar2) {
@@ -488,14 +561,15 @@ class HandTrackingService {
       // Centroid of the 3 fingertips
       const rawCentroidX = (thumbX + targetX + middleX) / 3;
       const rawCentroidY = (thumbY + targetY + middleY) / 3;
-      this.smoothedCentroidX += (rawCentroidX - this.smoothedCentroidX) * 0.40;
-      this.smoothedCentroidY += (rawCentroidY - this.smoothedCentroidY) * 0.40;
+      const centroidSmoothing = this.isMobileOrTablet ? 0.75 : 0.40;
+      this.smoothedCentroidX += (rawCentroidX - this.smoothedCentroidX) * centroidSmoothing;
+      this.smoothedCentroidY += (rawCentroidY - this.smoothedCentroidY) * centroidSmoothing;
 
-      // When the 3 fingers join together:
-      const isCurrentlyClose3 = threeFingerSpread < this.threeFingerOnThreshold || threeFingerRatio < this.threeFingerOnRatio;
+      // When the 3 fingers join together (ONLY when NOT in a fist, and Index & Middle are extended in pen grip):
+      const isCurrentlyClose3 = !isFist && !isIndexCurled && !isMiddleCurled && (threeFingerSpread < this.threeFingerOnThreshold || threeFingerRatio < this.threeFingerOnRatio);
 
-      // When the 3 fingers spread apart:
-      const isCurrentlyFar3 = threeFingerSpread > this.threeFingerOffThreshold && threeFingerRatio > this.threeFingerOffRatio;
+      // When the 3 fingers spread apart (or if student clenches a fist):
+      const isCurrentlyFar3 = isFist || (threeFingerSpread > this.threeFingerOffThreshold && threeFingerRatio > this.threeFingerOffRatio);
 
       if (this.currentThreeFingerState) {
         if (isCurrentlyFar3) {
@@ -510,9 +584,9 @@ class HandTrackingService {
       this.lastHandSeenTime = Date.now();
 
       // Smart Latch State Machine (Rule requested by user):
-      // 1. When 3 fingers join -> starts drawing and locks ON.
+      // 1. When 3 fingers join in pen grip -> starts drawing and locks ON.
       // 2. Tracks finger movement: even if a finger disappears from the camera, drawing DOES NOT STOP.
-      // 3. Drawing stops ONLY when the 3 fingers spread apart.
+      // 3. Drawing stops ONLY when the 3 fingers spread apart OR when student closes a fist!
       if (this.drawingGestureMode === 'three_finger_latch') {
         if (!this.isLatched) {
           if (isCurrentlyClose3) {
@@ -534,31 +608,28 @@ class HandTrackingService {
           }
         }
       } else if (this.drawingGestureMode === 'three_finger_pinch') {
-        this.isLatched = this.currentThreeFingerState;
+        this.isLatched = !isFist && this.currentThreeFingerState;
       } else if (this.drawingGestureMode === 'two_finger_pinch') {
-        this.isLatched = this.currentPinchState;
+        this.isLatched = !isFist && this.currentPinchState;
       } else if (this.drawingGestureMode === 'continuous') {
-        this.isLatched = true;
+        this.isLatched = !isFist;
       }
 
       // Active Draw Point: Always resilient index tip (never drops even if other fingers occluded)
       const activeDrawPoint = { x: this.smoothedX, y: this.smoothedY };
 
       // 3. Gesture Classification
-      let gesture: 'pointing' | 'two_finger_pinch' | 'three_finger_pen' | 'open_hand' | 'no_hand' = 'open_hand';
-      if (this.currentThreeFingerState || (this.isLatched && this.drawingGestureMode.includes('three_finger'))) {
+      let gesture: 'pointing' | 'two_finger_pinch' | 'three_finger_pen' | 'open_hand' | 'fist' | 'no_hand' = 'open_hand';
+      if (isFist) {
+        gesture = 'fist';
+      } else if (this.currentThreeFingerState || (this.isLatched && this.drawingGestureMode.includes('three_finger'))) {
         gesture = 'three_finger_pen';
       } else if (this.currentPinchState && distIndexMiddle > 0.08) {
         gesture = 'two_finger_pinch';
+      } else if (!isIndexCurled && (isMiddleCurled || rawDistance > 0.15)) {
+        gesture = 'pointing';
       } else {
-        // Pointing with index extended
-        const isIndexExtended = rawIndex.y < (landmarks[6]?.y ?? 1.0);
-        const isMiddleFolded = rawMiddle.y > (landmarks[10]?.y ?? 0);
-        if (isIndexExtended && (isMiddleFolded || rawDistance > 0.15)) {
-          gesture = 'pointing';
-        } else {
-          gesture = 'open_hand';
-        }
+        gesture = 'open_hand';
       }
 
       this.latestData = {
@@ -579,6 +650,7 @@ class HandTrackingService {
         isThreeFingerLatched: this.isLatched,
         activeDrawPoint,
         gesture,
+        isFist,
         landmarks: landmarks.map((pt: any) => ({ x: 1 - pt.x, y: pt.y, z: pt.z })),
         lastUpdated: Date.now(),
         fps: this.currentFps,
@@ -612,6 +684,7 @@ class HandTrackingService {
         isThreeFingerLatched: this.isLatched,
         activeDrawPoint: null,
         gesture: 'no_hand',
+        isFist: false,
         landmarks: null,
         lastUpdated: Date.now(),
         fps: this.currentFps,
@@ -671,6 +744,7 @@ class HandTrackingService {
       isThreeFingerLatched: false,
       activeDrawPoint: null,
       gesture: 'no_hand',
+      isFist: false,
       landmarks: null,
       lastUpdated: 0,
       fps: 0,
