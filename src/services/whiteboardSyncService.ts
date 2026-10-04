@@ -12,8 +12,9 @@ import mqtt, { MqttClient } from 'mqtt';
 export interface ConnectedStudent {
   id: string;
   name: string;
+  number?: string;
   deviceType: 'mobile' | 'tablet' | 'desktop';
-  status: 'online' | 'drawing' | 'finished' | 'idle';
+  status: 'online' | 'waiting' | 'drawing' | 'finished' | 'idle';
   accuracy: number;
   coverage: number;
   score: number;
@@ -42,6 +43,7 @@ export interface WhiteboardSyncMessage {
   senderRole?: 'teacher' | 'student';
   studentId?: string;
   studentName?: string;
+  studentNumber?: string;
   targetStudentId?: string; // 'all' or specific student id
   payload?: any;
   timestamp?: number;
@@ -64,7 +66,7 @@ class WhiteboardSyncService {
   
   private currentRole: 'teacher' | 'student' = 'teacher';
   private currentRoomCode: string = DEFAULT_ROOM;
-  private currentStudentInfo: { id: string; name: string; deviceType: 'mobile' | 'tablet' | 'desktop' } | null = null;
+  private currentStudentInfo: { id: string; name: string; number?: string; deviceType: 'mobile' | 'tablet' | 'desktop' } | null = null;
   
   private connectedStudents: Map<string, ConnectedStudent> = new Map();
   private heartbeatInterval: any = null;
@@ -135,7 +137,7 @@ class WhiteboardSyncService {
   public initRole(
     role: 'teacher' | 'student',
     roomCode: string = DEFAULT_ROOM,
-    studentInfo?: { id: string; name: string }
+    studentInfo?: { id: string; name: string; number?: string }
   ) {
     this.currentRole = role;
     this.currentRoomCode = roomCode || DEFAULT_ROOM;
@@ -149,6 +151,7 @@ class WhiteboardSyncService {
       this.currentStudentInfo = {
         id: studentInfo?.id || defaultId,
         name: studentInfo?.name || 'طالب جديد',
+        number: studentInfo?.number || '',
         deviceType: this.getDeviceType()
       };
     }
@@ -195,7 +198,9 @@ class WhiteboardSyncService {
             senderRole: 'student',
             studentId: this.currentStudentInfo.id,
             studentName: this.currentStudentInfo.name,
+            studentNumber: this.currentStudentInfo.number,
             payload: {
+              studentNumber: this.currentStudentInfo.number,
               deviceType: this.currentStudentInfo.deviceType
             }
           });
@@ -352,8 +357,9 @@ class WhiteboardSyncService {
         const existing: ConnectedStudent = this.connectedStudents.get(studentId) || {
           id: studentId,
           name: msg.studentName || 'طالب',
+          number: msg.studentNumber || msg.payload?.studentNumber || '',
           deviceType: msg.payload?.deviceType || 'mobile',
-          status: 'online',
+          status: 'waiting',
           accuracy: 0,
           coverage: 0,
           score: 0,
@@ -364,10 +370,11 @@ class WhiteboardSyncService {
 
         existing.lastSeen = now;
         if (msg.studentName) existing.name = msg.studentName;
+        if (msg.studentNumber || msg.payload?.studentNumber) existing.number = msg.studentNumber || msg.payload?.studentNumber;
         if (msg.payload?.deviceType) existing.deviceType = msg.payload.deviceType;
 
         if (msg.type === 'STUDENT_JOIN') {
-          existing.status = 'online';
+          existing.status = 'waiting';
         } else if (msg.type === 'STUDENT_PROGRESS') {
           existing.status = msg.payload?.isDrawing ? 'drawing' : 'idle';
           existing.accuracy = msg.payload?.accuracy ?? existing.accuracy;

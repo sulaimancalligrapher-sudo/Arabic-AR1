@@ -715,7 +715,9 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
                             )}
                           </div>
                           <div>
-                            <div className="text-xs font-extrabold text-white truncate max-w-[110px]">{std.name}</div>
+                            <div className="text-xs font-extrabold text-white truncate max-w-[130px]">
+                              {std.name} {std.number ? `(#${std.number})` : ''}
+                            </div>
                             <div className="text-[10px] text-slate-400 font-mono">
                               {std.deviceType === 'mobile' ? '📱 جوال' : std.deviceType === 'tablet' ? '📟 تابلت' : '💻 كمبيوتر'}
                             </div>
@@ -728,10 +730,10 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
                               ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40 animate-pulse'
                               : std.status === 'finished'
                               ? 'bg-amber-950 text-amber-300 border border-amber-500/40'
-                              : 'bg-slate-800 text-slate-300'
+                              : 'bg-sky-950 text-sky-300 border border-sky-500/40'
                           }`}
                         >
-                          {std.status === 'drawing' ? '✍️ يرسم الآن' : std.status === 'finished' ? '🏆 مكتمل' : '🟢 مستعد'}
+                          {std.status === 'drawing' ? '✍️ يرسم الآن' : std.status === 'finished' ? '🏆 مكتمل' : '⏳ في الانتظار'}
                         </span>
                       </div>
 

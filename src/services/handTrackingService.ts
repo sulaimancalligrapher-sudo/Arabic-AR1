@@ -42,6 +42,7 @@ export interface HandData {
   fps: number;
   estimatedLightLevel: 'dark' | 'good' | 'bright';
   isMobileOptimized?: boolean;
+  videoDimensions?: { width: number; height: number; aspect: number };
 }
 
 export type HandCallback = (data: HandData) => void;
@@ -64,6 +65,11 @@ class HandTrackingService {
   private callback: HandCallback | null = null;
   private isProcessingFrame: boolean = false;
   private isMobileOrTablet: boolean = false;
+  private videoDimensions: { width: number; height: number; aspect: number } = {
+    width: 640,
+    height: 480,
+    aspect: 640 / 480
+  };
 
   // Smart Latch Drawing State
   private isLatched: boolean = false;
@@ -273,86 +279,95 @@ class HandTrackingService {
       }
 
       // 2. Initialize MediaPipe Hands if not already created
-      // On mobile & tablets: modelComplexity = 0 (Lite model: 4x faster, smooth 30-60 FPS!)
-      // On desktop: modelComplexity = 1
       if (!this.hands) {
         this.hands = new HandsClass({
           locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
 
+        // Use Lite model (complexity: 0) on mobile/tablet for 30+ FPS and high responsiveness
+        // Use Full model (complexity: 1) on PC/Desktop
         this.hands.setOptions({
           maxNumHands: 1,
           modelComplexity: this.isMobileOrTablet ? 0 : 1,
-          minDetectionConfidence: 0.38,
-          minTrackingConfidence: 0.38
+          minDetectionConfidence: 0.45,
+          minTrackingConfidence: 0.45
         });
 
         this.hands.onResults((results: any) => this.processResults(results));
       }
 
-      // Resolution optimization:
-      // Mobile / tablets: 480x360 or 640x480 max
-      const camWidth = this.isMobileOrTablet ? 480 : 640;
-      const camHeight = this.isMobileOrTablet ? 360 : 480;
+      // 3. Direct Native getUserMedia with natural orientation
+      // Mobile portrait uses height > width, desktop uses width > height.
+      const isPortrait = typeof window !== 'undefined' && window.innerHeight > window.innerWidth;
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode: 'user',
+          width: isPortrait ? { ideal: 720 } : { ideal: 1280 },
+          height: isPortrait ? { ideal: 1280 } : { ideal: 720 },
+          frameRate: { ideal: 30, max: 30 }
+        },
+        audio: false
+      };
 
-      // 3. Initialize Camera helper
-      const CameraClass = (window as any).Camera;
-      if (CameraClass) {
-        this.camera = new CameraClass(this.videoElement, {
-          onFrame: async () => {
-            if (this.isRunning && this.hands && this.videoElement) {
-              if (this.isProcessingFrame) return; // Drop frame if previous is still computing to prevent lag
-              this.isProcessingFrame = true;
-              try {
-                this.updateFps();
-                await this.hands.send({ image: this.videoElement });
-              } catch {
-                // Ignore transient frame send error
-              } finally {
-                this.isProcessingFrame = false;
-              }
-            }
-          },
-          width: camWidth,
-          height: camHeight
-        });
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
-        await this.camera.start();
-        this.isRunning = true;
-        return { success: true };
+      this.videoElement.srcObject = stream;
+      this.videoElement.setAttribute('playsinline', 'true');
+      this.videoElement.setAttribute('webkit-playsinline', 'true');
+
+      // Wait until video metadata is loaded so natural videoWidth & videoHeight are known
+      await new Promise<void>((resolve) => {
+        if (this.videoElement!.videoWidth > 0 && this.videoElement!.videoHeight > 0) {
+          resolve();
+        } else {
+          this.videoElement!.onloadedmetadata = () => resolve();
+        }
+      });
+
+      await this.videoElement.play();
+
+      const vWidth = this.videoElement.videoWidth || (isPortrait ? 480 : 640);
+      const vHeight = this.videoElement.videoHeight || (isPortrait ? 640 : 480);
+      this.videoDimensions = {
+        width: vWidth,
+        height: vHeight,
+        aspect: vWidth / vHeight
+      };
+
+      this.isRunning = true;
+
+      // Efficient frame loop using requestVideoFrameCallback when available
+      const processLoop = async () => {
+        if (!this.isRunning || !this.videoElement || !this.hands) return;
+
+        if (!this.isProcessingFrame && this.videoElement.readyState >= 2) {
+          this.isProcessingFrame = true;
+          try {
+            this.updateFps();
+            await this.hands.send({ image: this.videoElement });
+          } catch {
+            // Ignore transient frame send error
+          } finally {
+            this.isProcessingFrame = false;
+          }
+        }
+
+        if (this.isRunning && this.videoElement) {
+          if ('requestVideoFrameCallback' in this.videoElement) {
+            (this.videoElement as any).requestVideoFrameCallback(processLoop);
+          } else {
+            requestAnimationFrame(processLoop);
+          }
+        }
+      };
+
+      if ('requestVideoFrameCallback' in this.videoElement) {
+        (this.videoElement as any).requestVideoFrameCallback(processLoop);
       } else {
-        // Direct getUserMedia fallback
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: camWidth, max: 640 },
-            height: { ideal: camHeight, max: 480 },
-            facingMode: 'user',
-            frameRate: { ideal: 30, max: 30 }
-          }
-        });
-        this.videoElement.srcObject = stream;
-        await this.videoElement.play();
-        this.isRunning = true;
-
-        const loop = async () => {
-          if (this.isRunning && this.videoElement && this.hands) {
-            if (!this.isProcessingFrame) {
-              this.isProcessingFrame = true;
-              try {
-                this.updateFps();
-                await this.hands.send({ image: this.videoElement });
-              } catch {
-                // Ignore
-              } finally {
-                this.isProcessingFrame = false;
-              }
-            }
-            requestAnimationFrame(loop);
-          }
-        };
-        requestAnimationFrame(loop);
-        return { success: true };
+        requestAnimationFrame(processLoop);
       }
+
+      return { success: true };
     } catch (err: any) {
       console.warn('Failed to start camera / hand tracking:', err);
       this.isRunning = false;
@@ -424,13 +439,16 @@ class HandTrackingService {
       this.smoothedX += (targetX - this.smoothedX) * this.SMOOTHING_FACTOR;
       this.smoothedY += (targetY - this.smoothedY) * this.SMOOTHING_FACTOR;
 
-      // Palm width (scale invariant reference)
-      const palmDx = (1 - rawPinkyKnuckle.x) - (1 - rawIndexKnuckle.x);
+      // Aspect ratio correction for true isotropic euclidean distance (prevents distortion on mobile portrait)
+      const aspect = this.videoDimensions.aspect || 1;
+
+      // Palm width (scale invariant reference with aspect correction)
+      const palmDx = ((1 - rawPinkyKnuckle.x) - (1 - rawIndexKnuckle.x)) * aspect;
       const palmDy = rawPinkyKnuckle.y - rawIndexKnuckle.y;
       const palmWidth = Math.max(0.04, Math.sqrt(palmDx * palmDx + palmDy * palmDy));
 
       // 1. Two-Finger Pinch (Thumb Tip to Index Tip) - Used for grabbing/moving
-      const dxThumbIndex = thumbX - targetX;
+      const dxThumbIndex = (thumbX - targetX) * aspect;
       const dyThumbIndex = thumbY - targetY;
       const rawDistance = Math.sqrt(dxThumbIndex * dxThumbIndex + dyThumbIndex * dyThumbIndex);
       const pinchRatio = rawDistance / palmWidth;
@@ -449,11 +467,11 @@ class HandTrackingService {
       }
 
       // 2. Three-Finger Pen Grip (Thumb + Index + Middle) - Used for drawing ✍️
-      const dxIndexMiddle = targetX - middleX;
+      const dxIndexMiddle = (targetX - middleX) * aspect;
       const dyIndexMiddle = targetY - middleY;
       const distIndexMiddle = Math.sqrt(dxIndexMiddle * dxIndexMiddle + dyIndexMiddle * dyIndexMiddle);
 
-      const dxThumbMiddle = thumbX - middleX;
+      const dxThumbMiddle = (thumbX - middleX) * aspect;
       const dyThumbMiddle = thumbY - middleY;
       const distThumbMiddle = Math.sqrt(dxThumbMiddle * dxThumbMiddle + dyThumbMiddle * dyThumbMiddle);
 
@@ -568,7 +586,8 @@ class HandTrackingService {
         lastUpdated: Date.now(),
         fps: this.currentFps,
         estimatedLightLevel: this.lightLevel,
-        isMobileOptimized: this.isMobileOrTablet
+        isMobileOptimized: this.isMobileOrTablet,
+        videoDimensions: this.videoDimensions
       };
     } else {
       // Hand temporarily out of frame: check 1s grace period before clearing latch
@@ -600,7 +619,8 @@ class HandTrackingService {
         lastUpdated: Date.now(),
         fps: this.currentFps,
         estimatedLightLevel: this.lightLevel,
-        isMobileOptimized: this.isMobileOrTablet
+        isMobileOptimized: this.isMobileOrTablet,
+        videoDimensions: this.videoDimensions
       };
     }
 

@@ -15,17 +15,18 @@ import {
   Activity,
   CheckCircle2,
   Play,
-  Sliders,
-  ChevronRight,
   Eye,
   EyeOff,
   Radio,
   Wifi,
-  WifiOff,
   Lock,
   Hand,
   User,
-  Zap
+  Zap,
+  Clock,
+  ArrowRight,
+  ShieldCheck,
+  Hash
 } from 'lucide-react';
 
 interface StudentWhiteboardViewProps {
@@ -34,8 +35,7 @@ interface StudentWhiteboardViewProps {
 }
 
 export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
-  initialDrawingId,
-  onExit
+  initialDrawingId
 }) => {
   const allDrawings = drawingEngineService.getAllDrawings();
   const defaultDrawing =
@@ -47,8 +47,8 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCloudConnected, setIsCloudConnected] = useState(true);
 
-  // Student Identity & Room
-  const [roomCode, setRoomCode] = useState<string>(() => {
+  // Student Identity & Flow State ('gate' -> 'waiting' -> 'drawing')
+  const [roomCode] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       return params.get('room') || localStorage.getItem('baseera_active_room') || '4821';
@@ -56,16 +56,42 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     return '4821';
   });
 
+  // Always show gate on initial open to allow entering name & number
+  const [flowState, setFlowState] = useState<'gate' | 'waiting' | 'drawing'>('gate');
+
   const [studentName, setStudentName] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
-      return params.get('name') || localStorage.getItem('baseera_student_name') || 'بطل الرسم';
+      return params.get('name') || localStorage.getItem('baseera_student_name') || '';
     }
-    return 'بطل الرسم';
+    return '';
   });
 
-  const [showNameModal, setShowNameModal] = useState(false);
-  const [tempName, setTempName] = useState(studentName);
+  const [studentNumber, setStudentNumber] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('number') || localStorage.getItem('baseera_student_number') || '';
+    }
+    return '';
+  });
+
+  // Gate Form Inputs (pre-filled with saved or query values for convenience)
+  const [inputName, setInputName] = useState(studentName);
+  const [inputNumber, setInputNumber] = useState(studentNumber);
+  const [gateError, setGateError] = useState<string | null>(null);
+
+  // Natural Native Video Dimensions (Measured dynamically from camera stream)
+  const [videoDims, setVideoDims] = useState<{ width: number; height: number; aspect: number }>({
+    width: 640,
+    height: 480,
+    aspect: 640 / 480
+  });
+
+  // Computed Stage Pixel Dimensions (Guarantees zero stretching on PC, mobile portrait, and tablets)
+  const [stageDimensions, setStageDimensions] = useState<{ width: number; height: number }>({
+    width: 640,
+    height: 480
+  });
 
   // Drawing & Session States
   const [isSessionActive, setIsSessionActive] = useState(false);
@@ -77,14 +103,14 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
   const [isFinished, setIsFinished] = useState(false);
   const isFinishedRef = useRef(false);
 
-  // Gesture Mode (Smart Latch 3-finger default as requested!)
-  const [gestureMode, setGestureMode] = useState<DrawingGestureMode>('three_finger_latch');
+  // Gesture Mode (Smart Latch 3-finger default)
+  const [gestureMode] = useState<DrawingGestureMode>('three_finger_latch');
   const gestureModeRef = useRef<DrawingGestureMode>('three_finger_latch');
   gestureModeRef.current = gestureMode;
 
   // Visual settings
   const [guideColor, setGuideColor] = useState<'yellow' | 'green' | 'white' | 'cyan' | 'black'>('yellow');
-  const [brushColor, setBrushColor] = useState('#10b981');
+  const [brushColor] = useState('#10b981');
   const [brushSize, setBrushSize] = useState(20);
   const [sensitivity, setSensitivity] = useState<PinchSensitivity>('easy');
   const [showVideo, setShowVideo] = useState(true);
@@ -98,12 +124,13 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
   const actionButtonRef = useRef<HTMLButtonElement | null>(null);
   const lastButtonTriggerRef = useRef(0);
 
-  // Canvases and refs
+  // Canvases and container refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const guideCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const userDrawCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const skeletonCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const stageWrapperRef = useRef<HTMLDivElement | null>(null);
+  const stageContainerRef = useRef<HTMLDivElement | null>(null);
+  const stageFrameRef = useRef<HTMLDivElement | null>(null);
 
   const analysisRef = useRef<ImageAnalysisResult | null>(null);
   const coveredSetRef = useRef<Set<number>>(new Set());
@@ -113,7 +140,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
   const startTimeRef = useRef(Date.now());
   const lastProgressReportRef = useRef(0);
 
-  // Detect mobile
+  // Detect mobile / tablet
   useEffect(() => {
     const isMobile =
       /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
@@ -122,31 +149,113 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     setIsMobileDevice(isMobile);
   }, []);
 
-  // Initialize Cloud Sync Role as Student
-  useEffect(() => {
-    whiteboardSyncService.initRole('student', roomCode, {
-      id: 'std_' + Math.random().toString(36).substring(2, 7),
-      name: studentName
+  // Update computed stage frame dimensions to fit container with MINIMAL margins and ZERO squishing
+  const updateStageDimensions = useCallback(() => {
+    if (!stageContainerRef.current) return;
+    const container = stageContainerRef.current;
+    const availW = container.clientWidth;
+    const availH = container.clientHeight;
+
+    if (availW <= 0 || availH <= 0) return;
+
+    const targetAspect = videoDims.aspect || 640 / 480;
+
+    let renderW = availW;
+    let renderH = availW / targetAspect;
+
+    if (renderH > availH) {
+      renderH = availH;
+      renderW = availH * targetAspect;
+    }
+
+    setStageDimensions({
+      width: Math.max(280, Math.floor(renderW)),
+      height: Math.max(210, Math.floor(renderH))
     });
+  }, [videoDims.aspect]);
+
+  // Recalculate stage dimensions on resize or when video aspect changes
+  useEffect(() => {
+    updateStageDimensions();
+    const handleResize = () => updateStageDimensions();
+    window.addEventListener('resize', handleResize);
+
+    const observer = new ResizeObserver(() => updateStageDimensions());
+    if (stageContainerRef.current) {
+      observer.observe(stageContainerRef.current);
+    }
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      observer.disconnect();
+    };
+  }, [updateStageDimensions]);
+
+  // Handle Gate Form Submission
+  const handleJoinClass = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputName.trim()) {
+      setGateError('يرجى كتابة اسم الطالب للانضمام للحصة');
+      return;
+    }
+    if (!inputNumber.trim()) {
+      setGateError('يرجى إدخال رقم الطالب أو رقم الجلوس');
+      return;
+    }
+
+    setGateError(null);
+    const cleanName = inputName.trim();
+    const cleanNum = inputNumber.trim();
+
+    setStudentName(cleanName);
+    setStudentNumber(cleanNum);
+
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('baseera_student_name', cleanName);
+      localStorage.setItem('baseera_student_number', cleanNum);
+      localStorage.setItem('baseera_student_joined', 'true');
+    }
+
+    // Connect to room via WebSockets / P2P
+    whiteboardSyncService.initRole('student', roomCode, {
+      id: 'std_' + cleanNum + '_' + Math.random().toString(36).substring(2, 6),
+      name: cleanName,
+      number: cleanNum
+    });
+
+    audioService.playChime();
+    audioService.speakArabic(`أهلاً بك يا ${cleanName}! أنت الآن في غرفة الصف وفي انتظار بدء المعلم للدرس`);
+    // Transition to waiting state until teacher sends lesson
+    setFlowState('waiting');
+  };
+
+  // Cloud Sync Listener: Listen for Teacher's session and drawing commands
+  useEffect(() => {
+    if (flowState === 'gate') return;
 
     const unsubscribe = whiteboardSyncService.subscribe((msg: WhiteboardSyncMessage) => {
       setIsCloudConnected(true);
+
+      // Teacher broadcasts a new drawing lesson -> Transition immediately to drawing stage!
       if (msg.type === 'SELECT_DRAWING') {
         const payloadDrawing = msg.payload?.drawing;
         const drawingId = msg.payload?.drawingId;
         const found =
-          (payloadDrawing && payloadDrawing.id)
+          payloadDrawing && payloadDrawing.id
             ? payloadDrawing
             : allDrawings.find((d) => d.id === drawingId);
 
         if (found) {
           setCurrentDrawing(found);
           clearCanvas();
+          setFlowState('drawing');
+          startDrawingSession();
           if (found.arabicAudioText) {
-            audioService.speakArabic(`وصلت رسمة جديدة من المعلم: ${found.title}`);
+            audioService.speakArabic(`بدأت الحصة! المعلم اختار درس: ${found.title}`);
           }
         }
       } else if (msg.type === 'START_SESSION') {
+        setFlowState('drawing');
         startDrawingSession();
       } else if (msg.type === 'FINISH_SESSION') {
         finishDrawingSession();
@@ -163,14 +272,20 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     });
 
     return () => unsubscribe();
-  }, [allDrawings, roomCode, studentName]);
+  }, [allDrawings, flowState]);
 
-  // Load and analyze the image template
+  // Load and analyze the image template matching current video dimensions
   useEffect(() => {
+    if (flowState !== 'drawing') return;
     let mounted = true;
+
     const analyze = async () => {
       try {
-        const result = await drawingEngineService.loadAndAnalyzeImage(currentDrawing.imageUrl, 700, 520);
+        const result = await drawingEngineService.loadAndAnalyzeImage(
+          currentDrawing.imageUrl,
+          videoDims.width,
+          videoDims.height
+        );
         if (mounted) {
           analysisRef.current = result;
           clearCanvas();
@@ -187,7 +302,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
           }
         }
       } catch (err) {
-        console.warn('Whiteboard image analysis notice:', err);
+        console.warn('Whiteboard image analysis error:', err);
       }
     };
 
@@ -195,9 +310,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     return () => {
       mounted = false;
     };
-  }, [currentDrawing.id, currentDrawing.imageUrl, guideColor]);
+  }, [currentDrawing.id, currentDrawing.imageUrl, flowState, guideColor, videoDims.width, videoDims.height]);
 
-  // Render guide lines when guide color changes
+  // Re-render guide canvas when color or opacity changes
   useEffect(() => {
     if (guideCanvasRef.current && analysisRef.current) {
       const colorOpt = GUIDE_LINE_COLORS.find((c) => c.id === guideColor) || GUIDE_LINE_COLORS[0];
@@ -212,9 +327,11 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     }
   }, [guideColor, currentDrawing.opacity]);
 
-  // Setup camera & MediaPipe tracking with Turbo Mobile Support
+  // Setup camera & MediaPipe tracking ONCE when joining (persists across waiting and drawing)
   useEffect(() => {
+    if (flowState === 'gate') return;
     let mounted = true;
+
     const startCamera = async () => {
       if (!videoRef.current) return;
       handTrackingService.setSensitivity(sensitivity);
@@ -222,6 +339,17 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
 
       await handTrackingService.startTracking(videoRef.current, (data: HandData) => {
         if (!mounted) return;
+
+        // Dynamically update dimensions to match natural camera stream with ZERO squishing!
+        if (data.videoDimensions && data.videoDimensions.width > 0) {
+          if (
+            data.videoDimensions.width !== videoDims.width ||
+            data.videoDimensions.height !== videoDims.height
+          ) {
+            setVideoDims(data.videoDimensions);
+          }
+        }
+
         handleHandUpdate(data);
       });
     };
@@ -231,7 +359,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       mounted = false;
       handTrackingService.stopTracking();
     };
-  }, [sensitivity, gestureMode]);
+  }, [flowState, sensitivity, gestureMode]);
 
   const clearCanvas = () => {
     if (userDrawCanvasRef.current) {
@@ -256,7 +384,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     setButtonFeedback(true);
     setTimeout(() => setButtonFeedback(false), 500);
     audioService.playChime();
-    audioService.speakArabic('بدأت جلسة الرسم! ضم أصابعك الثلاثة للبدء والتثبيت ✍️');
+    audioService.speakArabic('بدأت جلسة الرسم! ضم أصابعك الثلاثة وابدأ التلوين ✍️');
   };
 
   const finishDrawingSession = () => {
@@ -279,8 +407,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
 
     const resultRecord: DrawingResult = {
       id: 'board_' + Date.now(),
-      studentId: 'std_' + studentName,
+      studentId: 'std_' + (studentNumber || '0'),
       studentName: studentName,
+      studentNumber: studentNumber,
       drawingId: currentDrawing.id,
       drawingTitle: currentDrawing.title,
       mode: currentDrawing.mode,
@@ -376,7 +505,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     const currentAccuracy = Math.min(100, Math.round(covRatio * 0.7 + steadiness * 0.3));
     setAccuracy(currentAccuracy);
 
-    // Throttled progress report to teacher dashboard (<450ms)
+    // Throttled progress report to teacher dashboard
     const now = Date.now();
     if (now - lastProgressReportRef.current > 450) {
       lastProgressReportRef.current = now;
@@ -390,7 +519,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     }
   }, [brushColor, brushSize, currentDrawing.id, currentDrawing.title, currentDrawing.tolerance]);
 
-  // Touch and stylus draw support for mobile/tablets
+  // Touch & stylus support for tablets & mobile
   const handleTouchDraw = (e: React.TouchEvent<HTMLCanvasElement>) => {
     if (!isSessionActiveRef.current || isFinishedRef.current || !userDrawCanvasRef.current) return;
     const canvas = userDrawCanvasRef.current;
@@ -410,9 +539,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     lastDrawPosRef.current = null;
   };
 
-  // Hand update callback with Smart Latch logic
+  // Hand tracking update callback with Smart Latch logic
   const handleHandUpdate = useCallback((data: HandData) => {
-    if (!stageWrapperRef.current || !analysisRef.current) return;
+    if (!stageFrameRef.current || !analysisRef.current) return;
 
     const currentMode = gestureModeRef.current;
     const hasHand = !!data.indexTip;
@@ -466,10 +595,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       setIsHoveringButton(false);
     }
 
-    // 2. Smart Latch Drawing State:
-    // Drawing is active if session is on, hand is not over the button, and either:
-    // - In Latch Mode: data.isLatched is true (locked ON by joining 3 fingers; stays on until explicit open hand ✋)
-    // - In Pinch Mode: fingers actively joined
+    // 2. Smart Latch Drawing State
     let isDrawing = false;
     if (isSessionActiveRef.current && !isOverButton) {
       if (currentMode === 'three_finger_latch' || currentMode === 'two_finger_latch') {
@@ -478,143 +604,145 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
         isDrawing = !!data.isThreeFingerPinching;
       } else if (currentMode === 'two_finger_pinch') {
         isDrawing = !!data.isPinching;
-      } else {
+      } else if (currentMode === 'continuous') {
         isDrawing = true;
       }
     }
 
-    if (isDrawing !== isPenDownRef.current) {
+    if (isPenDownRef.current !== isDrawing) {
       isPenDownRef.current = isDrawing;
       setIsPenDown(isDrawing);
       if (isDrawing) {
-        audioService.playChime();
-        lastDrawPosRef.current = null;
+        audioService.playTickSound();
       }
     }
 
-    // 3. Render Hand Skeleton aligned 1:1 on the canvas
-    if (skeletonCanvasRef.current && data.landmarks) {
+    // 3. Render Skeleton & Virtual Pen
+    if (skeletonCanvasRef.current) {
       const cvs = skeletonCanvasRef.current;
       const ctx = cvs.getContext('2d');
       if (ctx) {
         ctx.clearRect(0, 0, cvs.width, cvs.height);
 
-        const connections = [
-          [0, 1], [1, 2], [2, 3], [3, 4],
-          [0, 5], [5, 6], [6, 7], [7, 8],
-          [0, 9], [9, 10], [10, 11], [11, 12],
-          [0, 13], [13, 14], [14, 15], [15, 16],
-          [0, 17], [17, 18], [18, 19], [19, 20],
-          [5, 9], [9, 13], [13, 17]
-        ];
+        if (data.landmarks && data.landmarks.length >= 21) {
+          const connections = [
+            [0, 1], [1, 2], [2, 3], [3, 4],
+            [0, 5], [5, 6], [6, 7], [7, 8],
+            [0, 9], [9, 10], [10, 11], [11, 12],
+            [0, 13], [13, 14], [14, 15], [15, 16],
+            [0, 17], [17, 18], [18, 19], [19, 20],
+            [5, 9], [9, 13], [13, 17]
+          ];
 
-        // Draw bone lines (matched perfectly to camera hand)
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = isOverButton
-          ? '#38bdf8'
-          : isDrawing
-          ? '#10b981'
-          : 'rgba(245, 158, 11, 0.55)';
-        connections.forEach(([i, j]) => {
-          const p1 = data.landmarks![i];
-          const p2 = data.landmarks![j];
-          if (p1 && p2) {
-            ctx.beginPath();
-            ctx.moveTo(p1.x * cvs.width, p1.y * cvs.height);
-            ctx.lineTo(p2.x * cvs.width, p2.y * cvs.height);
-            ctx.stroke();
-          }
-        });
-
-        // 3-Finger Pen Grip Triangle (Thumb 4 + Index 8 + Middle 12)
-        if (data.landmarks[4] && data.landmarks[8] && data.landmarks[12]) {
-          const pThumb = data.landmarks[4];
-          const pIndex = data.landmarks[8];
-          const pMiddle = data.landmarks[12];
-
-          ctx.beginPath();
-          ctx.moveTo(pThumb.x * cvs.width, pThumb.y * cvs.height);
-          ctx.lineTo(pIndex.x * cvs.width, pIndex.y * cvs.height);
-          ctx.lineTo(pMiddle.x * cvs.width, pMiddle.y * cvs.height);
-          ctx.closePath();
-
-          if (isDrawing) {
-            ctx.fillStyle = 'rgba(16, 185, 129, 0.35)';
-            ctx.fill();
-            ctx.lineWidth = 3;
-            ctx.strokeStyle = '#10b981';
-            ctx.stroke();
-          } else {
-            ctx.setLineDash([5, 5]);
-            ctx.lineWidth = 1.5;
-            ctx.strokeStyle = 'rgba(245, 158, 11, 0.5)';
-            ctx.stroke();
-            ctx.setLineDash([]);
-          }
-        }
-
-        // Highlight fingertips
-        if (data.thumbTip) {
-          ctx.beginPath();
-          ctx.arc(data.thumbTip.x * cvs.width, data.thumbTip.y * cvs.height, 6, 0, Math.PI * 2);
-          ctx.fillStyle = '#f59e0b';
-          ctx.fill();
-        }
-        if (data.middleTip) {
-          ctx.beginPath();
-          ctx.arc(data.middleTip.x * cvs.width, data.middleTip.y * cvs.height, 6, 0, Math.PI * 2);
-          ctx.fillStyle = '#06b6d4';
-          ctx.fill();
-        }
-        if (data.indexTip) {
-          ctx.beginPath();
-          ctx.arc(data.indexTip.x * cvs.width, data.indexTip.y * cvs.height, 7, 0, Math.PI * 2);
-          ctx.fillStyle = '#38bdf8';
-          ctx.fill();
-        }
-
-        // Virtual Button Cursor
-        if (isOverButton && data.indexTip) {
-          const px = data.indexTip.x * cvs.width;
-          const py = data.indexTip.y * cvs.height;
-
-          ctx.beginPath();
-          ctx.arc(px, py, 22, 0, Math.PI * 2);
-          ctx.strokeStyle = data.isPinching ? '#10b981' : '#38bdf8';
+          // Bone lines
           ctx.lineWidth = 3;
-          ctx.stroke();
+          ctx.strokeStyle = isOverButton
+            ? '#38bdf8'
+            : isDrawing
+            ? '#10b981'
+            : 'rgba(245, 158, 11, 0.55)';
 
-          ctx.font = 'bold 13px Cairo, sans-serif';
-          ctx.fillStyle = '#ffffff';
-          ctx.textAlign = 'center';
-          ctx.fillText(data.isPinching ? 'تم النقر! ✨' : 'اقبض بإصبعين 🤏', px, py - 30);
-        } else {
-          // Virtual Pen Point (Resilient centroid or index tip)
-          const activePoint = data.activeDrawPoint || data.threeFingerCentroid || data.indexTip;
-          if (activePoint) {
-            const px = activePoint.x * cvs.width;
-            const py = activePoint.y * cvs.height;
+          connections.forEach(([i, j]) => {
+            const p1 = data.landmarks![i];
+            const p2 = data.landmarks![j];
+            if (p1 && p2) {
+              ctx.beginPath();
+              ctx.moveTo(p1.x * cvs.width, p1.y * cvs.height);
+              ctx.lineTo(p2.x * cvs.width, p2.y * cvs.height);
+              ctx.stroke();
+            }
+          });
+
+          // 3-Finger Pen Grip Triangle
+          if (data.landmarks[4] && data.landmarks[8] && data.landmarks[12]) {
+            const pThumb = data.landmarks[4];
+            const pIndex = data.landmarks[8];
+            const pMiddle = data.landmarks[12];
+
+            ctx.beginPath();
+            ctx.moveTo(pThumb.x * cvs.width, pThumb.y * cvs.height);
+            ctx.lineTo(pIndex.x * cvs.width, pIndex.y * cvs.height);
+            ctx.lineTo(pMiddle.x * cvs.width, pMiddle.y * cvs.height);
+            ctx.closePath();
+
             if (isDrawing) {
-              ctx.beginPath();
-              ctx.arc(px, py, 16, 0, Math.PI * 2);
-              ctx.fillStyle = 'rgba(16, 185, 129, 0.3)';
+              ctx.fillStyle = 'rgba(16, 185, 129, 0.35)';
               ctx.fill();
-
-              ctx.beginPath();
-              ctx.arc(px, py, 8, 0, Math.PI * 2);
-              ctx.fillStyle = brushColor;
-              ctx.strokeStyle = '#ffffff';
               ctx.lineWidth = 3;
-              ctx.fill();
+              ctx.strokeStyle = '#10b981';
               ctx.stroke();
             } else {
-              ctx.beginPath();
-              ctx.arc(px, py, 12, 0, Math.PI * 2);
-              ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-              ctx.setLineDash([4, 4]);
-              ctx.lineWidth = 2;
+              ctx.setLineDash([5, 5]);
+              ctx.lineWidth = 1.5;
+              ctx.strokeStyle = 'rgba(245, 158, 11, 0.5)';
               ctx.stroke();
               ctx.setLineDash([]);
+            }
+          }
+
+          // Fingertips
+          if (data.thumbTip) {
+            ctx.beginPath();
+            ctx.arc(data.thumbTip.x * cvs.width, data.thumbTip.y * cvs.height, 6, 0, Math.PI * 2);
+            ctx.fillStyle = '#f59e0b';
+            ctx.fill();
+          }
+          if (data.middleTip) {
+            ctx.beginPath();
+            ctx.arc(data.middleTip.x * cvs.width, data.middleTip.y * cvs.height, 6, 0, Math.PI * 2);
+            ctx.fillStyle = '#06b6d4';
+            ctx.fill();
+          }
+          if (data.indexTip) {
+            ctx.beginPath();
+            ctx.arc(data.indexTip.x * cvs.width, data.indexTip.y * cvs.height, 7, 0, Math.PI * 2);
+            ctx.fillStyle = '#38bdf8';
+            ctx.fill();
+          }
+
+          // Virtual Button Cursor
+          if (isOverButton && data.indexTip) {
+            const px = data.indexTip.x * cvs.width;
+            const py = data.indexTip.y * cvs.height;
+
+            ctx.beginPath();
+            ctx.arc(px, py, 22, 0, Math.PI * 2);
+            ctx.strokeStyle = data.isPinching ? '#10b981' : '#38bdf8';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            ctx.font = 'bold 13px Cairo, sans-serif';
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.fillText(data.isPinching ? 'تم النقر! ✨' : 'اقبض بإصبعين 🤏', px, py - 30);
+          } else {
+            // Virtual Pen Point (Centroid or index tip fallback)
+            const activePoint = data.activeDrawPoint || data.threeFingerCentroid || data.indexTip;
+            if (activePoint) {
+              const px = activePoint.x * cvs.width;
+              const py = activePoint.y * cvs.height;
+              if (isDrawing) {
+                ctx.beginPath();
+                ctx.arc(px, py, 16, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(16, 185, 129, 0.3)';
+                ctx.fill();
+
+                ctx.beginPath();
+                ctx.arc(px, py, 8, 0, Math.PI * 2);
+                ctx.fillStyle = brushColor;
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 3;
+                ctx.fill();
+                ctx.stroke();
+              } else {
+                ctx.beginPath();
+                ctx.arc(px, py, 12, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+                ctx.setLineDash([4, 4]);
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.setLineDash([]);
+              }
             }
           }
         }
@@ -648,113 +776,148 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     }
   };
 
-  // Save student name
-  const handleSaveStudentName = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (tempName.trim()) {
-      setStudentName(tempName.trim());
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('baseera_student_name', tempName.trim());
-      }
-      whiteboardSyncService.initRole('student', roomCode, {
-        id: 'std_' + Math.random().toString(36).substring(2, 7),
-        name: tempName.trim()
-      });
-      setShowNameModal(false);
-    }
-  };
+  // =========================================================================
+  // STATE 1: STUDENT ENTRY GATE (اسم الطالب ورقمه مع زر إرسال - بدون زر خروج)
+  // =========================================================================
+  if (flowState === 'gate') {
+    return (
+      <div className="fixed inset-0 z-50 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 text-white flex flex-col items-center justify-center p-4 sm:p-6 overflow-y-auto select-none font-sans">
+        <div className="w-full max-w-md bg-slate-900/95 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl animate-fade-in relative text-right">
+          
+          {/* Top Badge */}
+          <div className="flex items-center justify-between mb-6">
+            <span className="text-[11px] px-3 py-1 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-500/40 font-mono font-bold flex items-center gap-1.5 shadow-sm">
+              <Wifi className="w-3 h-3 text-emerald-400 animate-pulse" />
+              <span>غرفة الصف: {roomCode}</span>
+            </span>
 
+            <span className="text-xs text-slate-400 flex items-center gap-1">
+              <ShieldCheck className="w-4 h-4 text-sky-400" />
+              <span>بث تفاعلي مباشر</span>
+            </span>
+          </div>
+
+          {/* Hero Avatar / Header */}
+          <div className="text-center mb-6">
+            <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-3xl bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center mx-auto mb-3 shadow-xl shadow-amber-500/20 text-slate-950">
+              <Sparkles className="w-8 h-8 sm:w-10 sm:h-10 animate-bounce" />
+            </div>
+            <h1 className="text-xl sm:text-2xl font-black font-serif text-white mb-1.5">
+              مرحباً بك في سبورة الأبطال 🌟
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-400">
+              أدخل اسمك ورقمك للانضمام إلى حصة المعلم والبدء في الرسم بالذكاء الاصطناعي
+            </p>
+          </div>
+
+          {/* Entry Form */}
+          <form onSubmit={handleJoinClass} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-300 mb-1.5 flex items-center justify-end gap-1.5">
+                <span>اسم الطالب (الثنائي أو الثلاثي)</span>
+                <User className="w-3.5 h-3.5 text-amber-400" />
+              </label>
+              <input
+                type="text"
+                required
+                value={inputName}
+                onChange={(e) => setInputName(e.target.value)}
+                placeholder="مثال: أحمد محمد علي"
+                className="w-full px-4 py-3 rounded-2xl bg-slate-950 border border-slate-700 text-white font-bold text-sm focus:border-amber-400 focus:ring-2 focus:ring-amber-400/20 outline-none transition-all placeholder:text-slate-600 text-right"
+                autoFocus
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-300 mb-1.5 flex items-center justify-end gap-1.5">
+                <span>رقم الطالب / رقم الجلوس</span>
+                <Hash className="w-3.5 h-3.5 text-amber-400" />
+              </label>
+              <input
+                type="text"
+                required
+                value={inputNumber}
+                onChange={(e) => setInputNumber(e.target.value)}
+                placeholder="مثال: 14 أو 102"
+                className="w-full px-4 py-3 rounded-2xl bg-slate-950 border border-slate-700 text-white font-mono font-bold text-sm focus:border-amber-400 focus:ring-2 focus:ring-amber-400/20 outline-none transition-all placeholder:text-slate-600 text-right"
+              />
+            </div>
+
+            {gateError && (
+              <div className="p-3 rounded-xl bg-rose-950/80 border border-rose-500/50 text-rose-300 text-xs font-bold text-center">
+                {gateError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="w-full py-3.5 px-6 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black text-sm flex items-center justify-center gap-2 shadow-xl shadow-amber-500/25 transition-all transform active:scale-95 cursor-pointer mt-2"
+            >
+              <span>تسجيل وإرسال لدخول الحصة</span>
+              <ArrowRight className="w-4 h-4 rotate-180" />
+            </button>
+          </form>
+
+          <p className="text-[11px] text-slate-500 text-center mt-5">
+            🔒 تُسجل النتائج والدرجات باسمك ورقمك وترسل مباشرة للمعلم.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // MAIN STAGE (SHARED BY WAITING OVERLAY & ACTIVE DRAWING)
+  // Camera & Canvases stay mounted continuously with zero squishing!
+  // =========================================================================
   return (
     <div className="fixed inset-0 z-50 bg-slate-950 text-white flex flex-col overflow-hidden select-none font-sans">
       
-      {/* Top Smart Board Header */}
-      <div className="px-4 sm:px-6 py-2.5 sm:py-3 border-b border-slate-800 bg-slate-900/95 backdrop-blur-md flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-2.5 sm:gap-3">
-          {onExit && (
-            <button
-              onClick={onExit}
-              className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
-              title="العودة للنظام الكامل"
-            >
-              <ChevronRight className="w-5 h-5" />
-            </button>
-          )}
-
+      {/* Top Header: Compact, minimal margins, NO back / exit button */}
+      <div className="px-3 sm:px-6 py-2 border-b border-slate-800 bg-slate-900/95 backdrop-blur-md flex items-center justify-between gap-2 sm:gap-3 flex-wrap z-30">
+        <div className="flex items-center gap-2 sm:gap-3">
+          <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold font-serif text-sm sm:text-base border border-amber-500/30 shadow-inner">
+            {flowState === 'waiting' ? '⏳' : currentDrawing.title.charAt(0)}
+          </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="text-base sm:text-lg font-black font-serif text-amber-400">
-                {currentDrawing.title}
+              <span className="text-sm sm:text-base font-black font-serif text-amber-400 leading-tight">
+                {flowState === 'waiting' ? 'في انتظار اختيار الدرس' : currentDrawing.title}
               </span>
-              <button
-                onClick={() => setShowNameModal(true)}
-                className="text-[11px] px-2.5 py-0.5 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold flex items-center gap-1 transition-colors"
-                title="اضغط لتغيير اسم الطالب"
-              >
+              <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-200 border border-slate-700 font-bold flex items-center gap-1">
                 <User className="w-3 h-3 text-amber-400" />
-                <span>{studentName}</span>
-              </button>
+                <span>{studentName} (#{studentNumber})</span>
+              </span>
             </div>
             <div className="flex items-center gap-2 text-xs text-slate-400 mt-0.5">
-              <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 font-mono flex items-center gap-1">
+              <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 font-mono flex items-center gap-1 font-bold">
                 <Wifi className="w-2.5 h-2.5 text-emerald-400 animate-pulse" />
-                <span>غرفة المعلم: {roomCode}</span>
+                <span>غرفة الصف: {roomCode}</span>
               </span>
               {isMobileDevice && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-950/80 text-blue-300 border border-blue-500/30 flex items-center gap-0.5 font-bold">
                   <Zap className="w-2.5 h-2.5 text-amber-400" />
-                  <span>وضع الجوال فائق السرعة</span>
+                  <span>طبيعي {videoDims.width}x{videoDims.height}</span>
                 </span>
               )}
             </div>
           </div>
         </div>
 
-        {/* Live Gauges & Controls */}
+        {/* Live Gauges & Stage Controls */}
         <div className="flex items-center gap-2 sm:gap-3">
           {/* Accuracy Score */}
-          <div className="flex items-center gap-2 bg-slate-950 px-3 py-1 rounded-xl border border-slate-800 shadow-inner">
-            <Activity className="w-4 h-4 text-emerald-400" />
-            <div className="text-right">
-              <div className="text-[9px] text-slate-400 font-semibold leading-none">نسبة الإتقان</div>
-              <div className="text-sm sm:text-base font-extrabold font-mono text-emerald-400 leading-tight">
-                {accuracy}% <span className="text-[10px] text-slate-500">/ {currentDrawing.targetAccuracy}%</span>
+          {flowState === 'drawing' && (
+            <div className="flex items-center gap-2 bg-slate-950 px-2.5 py-1 rounded-xl border border-slate-800 shadow-inner">
+              <Activity className="w-3.5 h-3.5 text-emerald-400" />
+              <div className="text-right">
+                <div className="text-[9px] text-slate-400 font-semibold leading-none">نسبة الإتقان</div>
+                <div className="text-xs sm:text-sm font-extrabold font-mono text-emerald-400 leading-tight">
+                  {accuracy}% <span className="text-[9px] text-slate-500">/ {currentDrawing.targetAccuracy}%</span>
+                </div>
               </div>
             </div>
-          </div>
-
-          {/* Gesture Mode Selector Switch (Latch vs Pinch) */}
-          <div className="hidden md:flex items-center gap-1 bg-slate-800/80 p-1 rounded-xl border border-slate-700 text-xs">
-            <button
-              onClick={() => {
-                setGestureMode('three_finger_latch');
-                handTrackingService.setDrawingGestureMode('three_finger_latch');
-              }}
-              className={`px-2.5 py-1 rounded-lg font-bold flex items-center gap-1 transition-all ${
-                gestureMode === 'three_finger_latch'
-                  ? 'bg-amber-500 text-slate-950 shadow'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-              title="تثبيت الرسم عند ضم 3 أصابع (لا ينقطع حتى تفرد الأصابع صراحة)"
-            >
-              <Lock className="w-3 h-3" />
-              <span>تثبيت ذكي (3 أصابع)</span>
-            </button>
-            <button
-              onClick={() => {
-                setGestureMode('two_finger_latch');
-                handTrackingService.setDrawingGestureMode('two_finger_latch');
-              }}
-              className={`px-2 py-1 rounded-lg font-bold flex items-center gap-1 transition-all ${
-                gestureMode === 'two_finger_latch'
-                  ? 'bg-amber-500 text-slate-950 shadow'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-              title="تثبيت الرسم بإصبعين"
-            >
-              <Lock className="w-3 h-3" />
-              <span>إصبعين</span>
-            </button>
-          </div>
+          )}
 
           {/* Toggle Video Feed */}
           <button
@@ -765,15 +928,17 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             {showVideo ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
           </button>
 
-          {/* Clear board */}
-          <button
-            onClick={clearCanvas}
-            className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs flex items-center gap-1.5 transition-colors"
-            title="مسح اللوحة"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">مسح</span>
-          </button>
+          {/* Clear board (only when drawing) */}
+          {flowState === 'drawing' && (
+            <button
+              onClick={clearCanvas}
+              className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs flex items-center gap-1.5 transition-colors"
+              title="مسح اللوحة"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">مسح</span>
+            </button>
+          )}
 
           {/* Fullscreen Button */}
           <button
@@ -786,101 +951,113 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
         </div>
       </div>
 
-      {/* Main Drawing Stage Area (100% 4:3 Aspect Ratio for Pixel-Perfect Skeleton Alignment on Mobile & Tablets) */}
-      <div className="flex-1 w-full flex items-center justify-center p-2 sm:p-4 relative overflow-hidden bg-slate-950">
-        
-        {/* Unified Responsive Stage Frame with exact 4:3 Aspect Ratio */}
+      {/* Main Drawing Stage Area (Dynamically fitted to camera stream with ZERO squishing on PC, Mobile, and Tablet) */}
+      <div
+        ref={stageContainerRef}
+        className="flex-1 w-full min-h-0 flex items-center justify-center p-0 sm:p-1 relative overflow-hidden bg-slate-950"
+      >
+        {/* Dynamic Aspect-Ratio Frame: Exact pixel fit with no stretching or distortion */}
         <div
-          ref={stageWrapperRef}
-          className="relative w-full max-w-[700px] aspect-[4/3] max-h-[82vh] rounded-3xl overflow-hidden bg-slate-950 border-2 border-slate-800 shadow-2xl flex items-center justify-center"
+          ref={stageFrameRef}
+          style={{
+            width: `${stageDimensions.width}px`,
+            height: `${stageDimensions.height}px`
+          }}
+          className="relative rounded-xl sm:rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 shadow-2xl flex items-center justify-center transition-all duration-150"
         >
-          {/* Layer 1: Mirror Video Camera Feed (Object-fill so landmarks 0..1 match pixel coordinates exactly) */}
+          {/* Layer 1: Mirror Video Camera Feed (True-to-life native aspect ratio, never squished!) */}
           <video
             ref={videoRef}
             playsInline
             muted
-            className={`absolute inset-0 w-full h-full object-fill -scale-x-100 transition-opacity duration-300 pointer-events-none ${
+            className={`absolute inset-0 w-full h-full object-contain -scale-x-100 transition-opacity duration-300 pointer-events-none ${
               showVideo ? 'opacity-90' : 'opacity-0'
             }`}
             style={{
-              filter: 'brightness(1.4) contrast(1.15) saturate(1.15)'
+              filter: 'brightness(1.35) contrast(1.15) saturate(1.15)'
             }}
           />
 
-          {/* Layer 2: Glowing Guide Canvas */}
-          <canvas
-            ref={guideCanvasRef}
-            width={700}
-            height={520}
-            className="absolute inset-0 w-full h-full object-fill pointer-events-none z-10 transition-all duration-200"
-            style={{
-              filter:
-                guideColor === 'yellow'
-                  ? 'drop-shadow(0 0 8px rgba(250, 204, 21, 0.9)) drop-shadow(0 0 16px rgba(234, 179, 8, 0.5))'
-                  : guideColor === 'green'
-                  ? 'drop-shadow(0 0 8px rgba(74, 222, 128, 0.9)) drop-shadow(0 0 16px rgba(34, 197, 94, 0.5))'
-                  : guideColor === 'white'
-                  ? 'drop-shadow(0 0 8px rgba(255, 255, 255, 0.95))'
-                  : guideColor === 'cyan'
-                  ? 'drop-shadow(0 0 8px rgba(56, 189, 248, 0.9)) drop-shadow(0 0 16px rgba(14, 165, 233, 0.5))'
-                  : 'drop-shadow(0 0 3px rgba(0, 0, 0, 0.7))'
-            }}
-          />
+          {/* Layer 2: Glowing Guide Canvas (Scaled exactly to native video dimensions) */}
+          {flowState === 'drawing' && (
+            <canvas
+              ref={guideCanvasRef}
+              width={videoDims.width}
+              height={videoDims.height}
+              className="absolute inset-0 w-full h-full object-contain pointer-events-none z-10 transition-all duration-200"
+              style={{
+                filter:
+                  guideColor === 'yellow'
+                    ? 'drop-shadow(0 0 8px rgba(250, 204, 21, 0.9)) drop-shadow(0 0 16px rgba(234, 179, 8, 0.5))'
+                    : guideColor === 'green'
+                    ? 'drop-shadow(0 0 8px rgba(74, 222, 128, 0.9)) drop-shadow(0 0 16px rgba(34, 197, 94, 0.5))'
+                    : guideColor === 'white'
+                    ? 'drop-shadow(0 0 8px rgba(255, 255, 255, 0.95))'
+                    : guideColor === 'cyan'
+                    ? 'drop-shadow(0 0 8px rgba(56, 189, 248, 0.9)) drop-shadow(0 0 16px rgba(14, 165, 233, 0.5))'
+                    : 'drop-shadow(0 0 3px rgba(0, 0, 0, 0.7))'
+              }}
+            />
+          )}
 
-          {/* Layer 3: Student Live Drawing Canvas (Supports hand tracking and touch drawing) */}
-          <canvas
-            ref={userDrawCanvasRef}
-            width={700}
-            height={520}
-            onTouchMove={handleTouchDraw}
-            onTouchEnd={handleTouchEnd}
-            className="absolute inset-0 w-full h-full object-fill cursor-crosshair z-20 touch-none"
-          />
+          {/* Layer 3: Student Live Drawing Canvas */}
+          {flowState === 'drawing' && (
+            <canvas
+              ref={userDrawCanvasRef}
+              width={videoDims.width}
+              height={videoDims.height}
+              onTouchMove={handleTouchDraw}
+              onTouchEnd={handleTouchEnd}
+              className="absolute inset-0 w-full h-full object-contain cursor-crosshair z-20 touch-none"
+            />
+          )}
 
           {/* Layer 4: Aligned Hand Skeleton Canvas */}
           <canvas
             ref={skeletonCanvasRef}
-            width={700}
-            height={520}
-            className="absolute inset-0 w-full h-full object-fill pointer-events-none z-30"
+            width={videoDims.width}
+            height={videoDims.height}
+            className="absolute inset-0 w-full h-full object-contain pointer-events-none z-30"
           />
 
-          {/* Interactive In-Canvas Button (Start / Finish Session with 2 Fingers or Touch) */}
-          <button
-            ref={actionButtonRef}
-            type="button"
-            onClick={handleToggleButton}
-            className={`absolute top-3 sm:top-4 right-3 sm:right-4 z-40 px-3 sm:px-4 py-2 sm:py-2.5 rounded-2xl border-2 flex items-center gap-2.5 transition-all duration-200 cursor-pointer shadow-2xl backdrop-blur-md select-none ${
-              buttonFeedback
-                ? 'scale-95 ring-8 ring-amber-400 bg-amber-400 text-slate-950'
-                : !isSessionActive
-                ? isHoveringButton
-                  ? 'bg-emerald-900/95 border-emerald-400 text-emerald-100 scale-105 ring-4 ring-emerald-400/60 shadow-emerald-500/40 animate-pulse'
-                  : 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200 hover:bg-emerald-900/90'
-                : isHoveringButton
-                ? 'bg-rose-900/95 border-rose-400 text-rose-100 scale-105 ring-4 ring-rose-400/60 shadow-rose-500/40 animate-pulse'
-                : 'bg-rose-950/90 border-rose-500/80 text-rose-200 hover:bg-rose-900/90'
-            }`}
-          >
-            <div
-              className={`w-6 h-6 sm:w-7 sm:h-7 rounded-xl flex items-center justify-center font-bold shadow ${
-                !isSessionActive ? 'bg-emerald-500 text-slate-950' : 'bg-rose-500 text-white'
+          {/* Interactive In-Canvas Button (Start / Finish Session - only when in drawing mode) */}
+          {flowState === 'drawing' && (
+            <button
+              ref={actionButtonRef}
+              type="button"
+              onClick={handleToggleButton}
+              className={`absolute top-3 sm:top-4 right-3 sm:right-4 z-40 px-3 sm:px-4 py-2 sm:py-2.5 rounded-2xl border-2 flex items-center gap-2.5 transition-all duration-200 cursor-pointer shadow-2xl backdrop-blur-md select-none ${
+                buttonFeedback
+                  ? 'scale-95 ring-8 ring-amber-400 bg-amber-400 text-slate-950'
+                  : !isSessionActive
+                  ? isHoveringButton
+                    ? 'bg-emerald-900/95 border-emerald-400 text-emerald-100 scale-105 ring-4 ring-emerald-400/60 shadow-emerald-500/40 animate-pulse'
+                    : 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200 hover:bg-emerald-900/90'
+                  : isHoveringButton
+                  ? 'bg-rose-900/95 border-rose-400 text-rose-100 scale-105 ring-4 ring-rose-400/60 shadow-rose-500/40 animate-pulse'
+                  : 'bg-rose-950/90 border-rose-500/80 text-rose-200 hover:bg-rose-900/90'
               }`}
             >
-              {!isSessionActive ? <Play className="w-3.5 h-3.5 fill-current" /> : <CheckCircle2 className="w-4 h-4" />}
-            </div>
-            <div className="text-right">
-              <div className="text-xs sm:text-sm font-extrabold leading-none">
-                {!isSessionActive ? 'ابدأ الرسم الآن' : 'إنهاء وحفظ النتيجة'}
+              <div
+                className={`w-6 h-6 sm:w-7 sm:h-7 rounded-xl flex items-center justify-center font-bold shadow ${
+                  !isSessionActive ? 'bg-emerald-500 text-slate-950' : 'bg-rose-500 text-white'
+                }`}
+              >
+                {!isSessionActive ? <Play className="w-3.5 h-3.5 fill-current" /> : <CheckCircle2 className="w-4 h-4" />}
               </div>
-              <div className="text-[9px] sm:text-[10px] text-slate-400 mt-0.5">
-                {!isSessionActive ? 'اقبض بإصبعين 🤏 للنقر' : 'اضغط للنهاية والاحتفال'}
+              <div className="text-right">
+                <div className="text-xs sm:text-sm font-extrabold leading-none">
+                  {!isSessionActive ? 'ابدأ الرسم الآن' : 'إنهاء وحفظ النتيجة'}
+                </div>
+                <div className="text-[9px] sm:text-[10px] text-slate-400 mt-0.5">
+                  {!isSessionActive ? 'اقبض بإصبعين 🤏 للنقر' : 'اضغط للنهاية والاحتفال'}
+                </div>
               </div>
-            </div>
-          </button>
+            </button>
+          )}
 
           {/* Smart Latch Drawing Status Badge */}
-          {isSessionActive && (
+          {flowState === 'drawing' && isSessionActive && (
             <div className="absolute top-3 sm:top-4 left-3 sm:left-4 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border text-xs font-bold transition-all shadow-xl select-none bg-slate-900/90 border-slate-700">
               {isPenDown ? (
                 <span className="flex items-center gap-1.5 text-emerald-400">
@@ -898,6 +1075,50 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             </div>
           )}
 
+          {/* ============================================================== */}
+          {/* WAITING OVERLAY: Shown after registration until Teacher starts */}
+          {/* ============================================================== */}
+          {flowState === 'waiting' && (
+            <div className="absolute inset-0 z-40 bg-slate-950/85 backdrop-blur-md flex flex-col items-center justify-center p-4 sm:p-6 text-center animate-fade-in">
+              <div className="max-w-md w-full bg-slate-900/90 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-4">
+                
+                {/* Live Room Badge */}
+                <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 text-xs font-bold shadow-sm">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
+                  <span>متصل بنجاح بغرفة الصف: {roomCode}</span>
+                </div>
+
+                <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-sky-500/10 border-2 border-sky-400/30 flex items-center justify-center mx-auto text-sky-400 shadow-xl shadow-sky-500/10">
+                  <Clock className="w-8 h-8 sm:w-10 sm:h-10 animate-spin" style={{ animationDuration: '6s' }} />
+                </div>
+
+                <div>
+                  <h2 className="text-lg sm:text-2xl font-black text-white font-serif mb-1">
+                    أهلاً بك يا بطل: <span className="text-amber-400">{studentName}</span>
+                  </h2>
+                  <div className="text-xs text-slate-400 font-mono font-bold">
+                    رقم الطالب: #{studentNumber}
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
+                  <p className="text-sm font-bold text-sky-300 flex items-center justify-center gap-2">
+                    <Radio className="w-4 h-4 animate-pulse text-sky-400" />
+                    <span>في انتظار المعلم لبدء الجلسة واختيار الدرس...</span>
+                  </p>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    بمجرد أن يبدأ المعلم الجلسة ويحدد الرسمة من لوحة التحكم، ستظهر أمامك على الفور وتبدأ في الرسم والتلوين 🎨
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-center gap-2 text-[11px] text-emerald-400 font-bold bg-slate-950/60 py-2 rounded-xl border border-slate-800/80">
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>الكاميرا وتتبع اليد قيد الجاهزية والعمل 🟢</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Congratulations Modal Overlay */}
           {isFinished && (
             <div className="absolute inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center animate-fade-in">
@@ -905,10 +1126,10 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
                 <Sparkles className="w-10 h-10 text-emerald-400" />
               </div>
               <h2 className="text-2xl sm:text-3xl font-black text-amber-400 mb-2">
-                أحسنت يا بطل! 🌟
+                أحسنت يا {studentName}! 🌟
               </h2>
               <p className="text-slate-300 text-sm max-w-sm mb-4">
-                تم إكمال رسمة «{currentDrawing.title}» بنجاح وإرسال درجتك إلى المعلم مباشرة!
+                تم إكمال رسمة «{currentDrawing.title}» بنجاح وتسجيل درجتك باسمك (#{studentNumber}) للمعلم!
               </p>
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center gap-6 mb-6">
                 <div>
@@ -925,7 +1146,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
               </div>
               <button
                 onClick={clearCanvas}
-                className="px-6 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold flex items-center gap-2 shadow-lg transition-transform active:scale-95"
+                className="px-6 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold flex items-center gap-2 shadow-lg transition-transform active:scale-95 cursor-pointer"
               >
                 <RefreshCw className="w-4 h-4" />
                 <span>إعادة المحاولة من جديد</span>
@@ -934,49 +1155,6 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
           )}
         </div>
       </div>
-
-      {/* Student Name Modal */}
-      {showNameModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-md w-full shadow-2xl text-right">
-            <h3 className="text-lg font-black text-amber-400 mb-2 flex items-center justify-end gap-2">
-              <span>اسم الطالب في الصف الافتراضي</span>
-              <User className="w-5 h-5" />
-            </h3>
-            <p className="text-xs text-slate-400 mb-4">
-              اكتب اسمك لتظهر نقاطك وإنجازاتك في لوحة متابعة المعلم في الوقت الحقيقي.
-            </p>
-            <form onSubmit={handleSaveStudentName} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">اسمك:</label>
-                <input
-                  type="text"
-                  value={tempName}
-                  onChange={(e) => setTempName(e.target.value)}
-                  placeholder="مثال: أحمد، سارة، عمر"
-                  className="w-full px-4 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-bold focus:border-amber-400 outline-none"
-                  autoFocus
-                />
-              </div>
-              <div className="flex items-center gap-2 justify-end pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowNameModal(false)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold"
-                >
-                  إلغاء
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black shadow"
-                >
-                  حفظ وتأكيد
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

@@ -157,6 +157,7 @@ export interface DrawingResult {
   id: string;
   studentId: string;
   studentName: string;
+  studentNumber?: string;
   drawingId: string;
   drawingTitle: string;
   mode: DrawingMode;
