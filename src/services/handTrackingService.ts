@@ -29,6 +29,11 @@ export interface HandData {
   threeFingerRatio: number;
   threeFingerCentroid: { x: number; y: number } | null;
 
+  // Smart Latch State Machine (Locks drawing ON when 3 fingers joined; only releases when fingers spread)
+  isLatched: boolean;
+  isThreeFingerLatched: boolean;
+  activeDrawPoint: { x: number; y: number } | null;
+
   // Active detected gesture
   gesture: 'pointing' | 'two_finger_pinch' | 'three_finger_pen' | 'open_hand' | 'no_hand';
 
@@ -36,10 +41,20 @@ export interface HandData {
   lastUpdated: number;
   fps: number;
   estimatedLightLevel: 'dark' | 'good' | 'bright';
+  isMobileOptimized?: boolean;
 }
 
 export type HandCallback = (data: HandData) => void;
 export type PinchSensitivity = 'easy' | 'normal' | 'strict';
+export type DrawingGestureMode =
+  | 'three_finger_latch'
+  | 'three_finger_pinch'
+  | 'three_finger'
+  | 'two_finger_latch'
+  | 'two_finger_pinch'
+  | 'two_finger'
+  | 'continuous'
+  | 'index_continuous';
 
 class HandTrackingService {
   private hands: any = null;
@@ -47,6 +62,14 @@ class HandTrackingService {
   private videoElement: HTMLVideoElement | null = null;
   private isRunning: boolean = false;
   private callback: HandCallback | null = null;
+  private isProcessingFrame: boolean = false;
+  private isMobileOrTablet: boolean = false;
+
+  // Smart Latch Drawing State
+  private isLatched: boolean = false;
+  private drawingGestureMode: DrawingGestureMode = 'three_finger_latch';
+  private lastHandSeenTime: number = 0;
+  private readonly HAND_LOST_GRACE_MS: number = 1000; // 1s grace buffer against camera flicker
 
   // 2-Finger Pinch Sensitivity Thresholds
   private pinchOnThreshold: number = 0.11;
@@ -54,11 +77,10 @@ class HandTrackingService {
   private currentPinchState: boolean = false;
 
   // 3-Finger Pen Grip Thresholds (Thumb + Index + Middle)
-  // Must be strictly calibrated so an open hand never accidentally triggers pen-down
-  private threeFingerOnThreshold: number = 0.075;
-  private threeFingerOffThreshold: number = 0.092;
-  private threeFingerOnRatio: number = 0.52;
-  private threeFingerOffRatio: number = 0.60;
+  private threeFingerOnThreshold: number = 0.080;
+  private threeFingerOffThreshold: number = 0.098;
+  private threeFingerOnRatio: number = 0.54;
+  private threeFingerOffRatio: number = 0.65;
   private currentThreeFingerState: boolean = false;
 
   private sensitivity: PinchSensitivity = 'easy';
@@ -93,12 +115,38 @@ class HandTrackingService {
     threeFingerSpread: 1.0,
     threeFingerRatio: 1.0,
     threeFingerCentroid: null,
+    isLatched: false,
+    isThreeFingerLatched: false,
+    activeDrawPoint: null,
     gesture: 'no_hand',
     landmarks: null,
     lastUpdated: 0,
     fps: 0,
-    estimatedLightLevel: 'good'
+    estimatedLightLevel: 'good',
+    isMobileOptimized: false
   };
+
+  /**
+   * Set drawing gesture mode
+   */
+  public setDrawingGestureMode(mode: DrawingGestureMode) {
+    this.drawingGestureMode = mode;
+    if (mode === 'continuous') {
+      this.isLatched = true;
+    } else {
+      this.isLatched = false;
+    }
+  }
+
+  public getDrawingGestureMode(): DrawingGestureMode {
+    return this.drawingGestureMode;
+  }
+
+  public resetLatch() {
+    this.isLatched = false;
+    this.currentThreeFingerState = false;
+    this.currentPinchState = false;
+  }
 
   /**
    * Set pinch & pen grip sensitivity
@@ -205,6 +253,13 @@ class HandTrackingService {
     this.callback = onHandData;
     this.videoElement = videoEl;
 
+    // Detect mobile or tablet devices for turbo performance tuning
+    this.isMobileOrTablet =
+      typeof window !== 'undefined' &&
+      (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+        (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1) ||
+        window.innerWidth <= 840);
+
     // Apply brightness enhancement filter to video immediately
     this.videoElement.style.filter = `brightness(${this.brightnessMultiplier}) contrast(1.15) saturate(1.15)`;
 
@@ -218,6 +273,8 @@ class HandTrackingService {
       }
 
       // 2. Initialize MediaPipe Hands if not already created
+      // On mobile & tablets: modelComplexity = 0 (Lite model: 4x faster, smooth 30-60 FPS!)
+      // On desktop: modelComplexity = 1
       if (!this.hands) {
         this.hands = new HandsClass({
           locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
@@ -225,13 +282,18 @@ class HandTrackingService {
 
         this.hands.setOptions({
           maxNumHands: 1,
-          modelComplexity: 1,
-          minDetectionConfidence: 0.4,
-          minTrackingConfidence: 0.4
+          modelComplexity: this.isMobileOrTablet ? 0 : 1,
+          minDetectionConfidence: 0.38,
+          minTrackingConfidence: 0.38
         });
 
         this.hands.onResults((results: any) => this.processResults(results));
       }
+
+      // Resolution optimization:
+      // Mobile / tablets: 480x360 or 640x480 max
+      const camWidth = this.isMobileOrTablet ? 480 : 640;
+      const camHeight = this.isMobileOrTablet ? 360 : 480;
 
       // 3. Initialize Camera helper
       const CameraClass = (window as any).Camera;
@@ -239,12 +301,20 @@ class HandTrackingService {
         this.camera = new CameraClass(this.videoElement, {
           onFrame: async () => {
             if (this.isRunning && this.hands && this.videoElement) {
-              this.updateFps();
-              await this.hands.send({ image: this.videoElement });
+              if (this.isProcessingFrame) return; // Drop frame if previous is still computing to prevent lag
+              this.isProcessingFrame = true;
+              try {
+                this.updateFps();
+                await this.hands.send({ image: this.videoElement });
+              } catch {
+                // Ignore transient frame send error
+              } finally {
+                this.isProcessingFrame = false;
+              }
             }
           },
-          width: 640,
-          height: 480
+          width: camWidth,
+          height: camHeight
         });
 
         await this.camera.start();
@@ -254,9 +324,10 @@ class HandTrackingService {
         // Direct getUserMedia fallback
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
-            width: { ideal: 640 },
-            height: { ideal: 480 },
-            facingMode: 'user'
+            width: { ideal: camWidth, max: 640 },
+            height: { ideal: camHeight, max: 480 },
+            facingMode: 'user',
+            frameRate: { ideal: 30, max: 30 }
           }
         });
         this.videoElement.srcObject = stream;
@@ -265,8 +336,17 @@ class HandTrackingService {
 
         const loop = async () => {
           if (this.isRunning && this.videoElement && this.hands) {
-            this.updateFps();
-            await this.hands.send({ image: this.videoElement });
+            if (!this.isProcessingFrame) {
+              this.isProcessingFrame = true;
+              try {
+                this.updateFps();
+                await this.hands.send({ image: this.videoElement });
+              } catch {
+                // Ignore
+              } finally {
+                this.isProcessingFrame = false;
+              }
+            }
             requestAnimationFrame(loop);
           }
         };
@@ -391,8 +471,14 @@ class HandTrackingService {
       // To start drawing: ALL 3 fingers must be joined together into a true pen grip
       const isCurrentlyClose3 = threeFingerSpread < this.threeFingerOnThreshold && threeFingerRatio < this.threeFingerOnRatio;
 
-      // To stop drawing: Opening fingers or lifting the pen releases IMMEDIATELY
+      // To stop drawing: Opening fingers or lifting the pen releases
       const isCurrentlyFar3 = threeFingerSpread > this.threeFingerOffThreshold || threeFingerRatio > this.threeFingerOffRatio;
+
+      // Explicit Open Hand: User deliberately spreading fingers wide to stop drawing ✋
+      const isOpenHandSpread =
+        threeFingerSpread > this.threeFingerOffThreshold * 1.35 ||
+        threeFingerRatio > this.threeFingerOffRatio * 1.3 ||
+        (rawMiddle.y < (landmarks[10]?.y ?? 0) && rawRing.y < (landmarks[14]?.y ?? 0) && rawPinky.y < (landmarks[18]?.y ?? 0));
 
       if (this.currentThreeFingerState) {
         if (isCurrentlyFar3) {
@@ -404,9 +490,48 @@ class HandTrackingService {
         }
       }
 
+      this.lastHandSeenTime = Date.now();
+
+      // Smart Latch State Machine (Drawing Lock ON / OFF)
+      // When user joins fingers: Lock is activated (ON).
+      // Even if camera briefly loses a finger or hand tilts, drawing stays locked ON!
+      // Unlocks (OFF) ONLY when user spreads fingers wide into open hand.
+      if (this.drawingGestureMode === 'three_finger_latch') {
+        if (!this.isLatched) {
+          if (isCurrentlyClose3) {
+            this.isLatched = true;
+          }
+        } else {
+          if (isOpenHandSpread) {
+            this.isLatched = false;
+          }
+        }
+      } else if (this.drawingGestureMode === 'two_finger_latch') {
+        if (!this.isLatched) {
+          if (isCurrentlyClose2) {
+            this.isLatched = true;
+          }
+        } else {
+          if (isOpenHandSpread) {
+            this.isLatched = false;
+          }
+        }
+      } else if (this.drawingGestureMode === 'three_finger_pinch') {
+        this.isLatched = this.currentThreeFingerState;
+      } else if (this.drawingGestureMode === 'two_finger_pinch') {
+        this.isLatched = this.currentPinchState;
+      } else if (this.drawingGestureMode === 'continuous') {
+        this.isLatched = true;
+      }
+
+      // Active Draw Point: Resilient centroid or index tip fallback if a finger is occluded
+      const activeDrawPoint = (this.currentThreeFingerState && this.smoothedCentroidX)
+        ? { x: this.smoothedCentroidX, y: this.smoothedCentroidY }
+        : { x: this.smoothedX, y: this.smoothedY };
+
       // 3. Gesture Classification
       let gesture: 'pointing' | 'two_finger_pinch' | 'three_finger_pen' | 'open_hand' | 'no_hand' = 'open_hand';
-      if (this.currentThreeFingerState) {
+      if (this.currentThreeFingerState || (this.isLatched && this.drawingGestureMode.includes('three_finger'))) {
         gesture = 'three_finger_pen';
       } else if (this.currentPinchState && distIndexMiddle > 0.08) {
         gesture = 'two_finger_pinch';
@@ -435,16 +560,24 @@ class HandTrackingService {
         threeFingerSpread,
         threeFingerRatio,
         threeFingerCentroid: { x: this.smoothedCentroidX, y: this.smoothedCentroidY },
+        isLatched: this.isLatched,
+        isThreeFingerLatched: this.isLatched,
+        activeDrawPoint,
         gesture,
         landmarks: landmarks.map((pt: any) => ({ x: 1 - pt.x, y: pt.y, z: pt.z })),
         lastUpdated: Date.now(),
         fps: this.currentFps,
-        estimatedLightLevel: this.lightLevel
+        estimatedLightLevel: this.lightLevel,
+        isMobileOptimized: this.isMobileOrTablet
       };
     } else {
-      // No hand detected
-      this.currentPinchState = false;
-      this.currentThreeFingerState = false;
+      // Hand temporarily out of frame: check 1s grace period before clearing latch
+      const now = Date.now();
+      if (now - this.lastHandSeenTime > this.HAND_LOST_GRACE_MS) {
+        this.isLatched = false;
+        this.currentPinchState = false;
+        this.currentThreeFingerState = false;
+      }
       this.latestData = {
         indexTip: null,
         thumbTip: null,
@@ -459,11 +592,15 @@ class HandTrackingService {
         threeFingerSpread: 1.0,
         threeFingerRatio: 1.0,
         threeFingerCentroid: null,
+        isLatched: this.isLatched,
+        isThreeFingerLatched: this.isLatched,
+        activeDrawPoint: null,
         gesture: 'no_hand',
         landmarks: null,
         lastUpdated: Date.now(),
         fps: this.currentFps,
-        estimatedLightLevel: this.lightLevel
+        estimatedLightLevel: this.lightLevel,
+        isMobileOptimized: this.isMobileOrTablet
       };
     }
 
@@ -513,11 +650,15 @@ class HandTrackingService {
       threeFingerSpread: 1.0,
       threeFingerRatio: 1.0,
       threeFingerCentroid: null,
+      isLatched: false,
+      isThreeFingerLatched: false,
+      activeDrawPoint: null,
       gesture: 'no_hand',
       landmarks: null,
       lastUpdated: 0,
       fps: 0,
-      estimatedLightLevel: 'good'
+      estimatedLightLevel: 'good',
+      isMobileOptimized: false
     };
     this.currentPinchState = false;
     this.currentThreeFingerState = false;

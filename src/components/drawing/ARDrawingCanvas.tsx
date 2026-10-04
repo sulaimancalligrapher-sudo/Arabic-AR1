@@ -43,7 +43,12 @@ const PALETTE_COLORS = [
   { name: 'برتقالي مشرق', hex: '#f97316', ring: 'ring-orange-400' }
 ];
 
-export type DrawingGestureMode = 'three_finger' | 'two_finger' | 'index_continuous';
+export type DrawingGestureMode =
+  | 'three_finger_latch'
+  | 'three_finger'
+  | 'two_finger_latch'
+  | 'two_finger'
+  | 'index_continuous';
 
 export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
   drawing,
@@ -59,8 +64,8 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
   const [brightness, setBrightness] = useState<number>(1.5);
   const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
 
-  // Gesture Drawing Mode (Default: 3-Finger Pen Grip ✍️ as requested!)
-  const [gestureMode, setGestureMode] = useState<DrawingGestureMode>('three_finger');
+  // Gesture Drawing Mode (Default: Smart 3-Finger Latch 🔒✍️ as requested!)
+  const [gestureMode, setGestureMode] = useState<DrawingGestureMode>('three_finger_latch');
   const [isPenDown, setIsPenDown] = useState(false);
   const [handDetected, setHandDetected] = useState(false);
   const [sensitivity, setSensitivity] = useState<PinchSensitivity>('easy');
@@ -184,6 +189,8 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
       setCameraError(null);
 
       handTrackingService.setBrightnessMultiplier(brightness);
+      handTrackingService.setSensitivity(sensitivity);
+      handTrackingService.setDrawingGestureMode(gestureMode);
 
       const res = await handTrackingService.startTracking(videoRef.current, (data: HandData) => {
         if (!mounted) return;
@@ -427,7 +434,9 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
     // Session MUST be active, and hand NOT over the button!
     let isDrawing = false;
     if (isDrawingSessionActiveRef.current && !isOverActionButton) {
-      if (currentMode === 'three_finger') {
+      if (currentMode === 'three_finger_latch' || currentMode === 'two_finger_latch') {
+        isDrawing = !!data.isLatched;
+      } else if (currentMode === 'three_finger') {
         isDrawing = !!data.isThreeFingerPinching;
       } else if (currentMode === 'two_finger') {
         isDrawing = !!data.isPinching;
@@ -560,10 +569,11 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
             py - 28
           );
         } else {
-          // Normal Pen Tip Cursor Rendering
-          const activePoint = (currentMode === 'three_finger' && data.threeFingerCentroid)
-            ? data.threeFingerCentroid
-            : data.indexTip;
+          // Normal Pen Tip Cursor Rendering (Uses resilient activeDrawPoint if finger is occluded)
+          const activePoint =
+            data.activeDrawPoint ||
+            (currentMode.includes('three_finger') && data.threeFingerCentroid) ||
+            data.indexTip;
 
           if (activePoint) {
             const px = activePoint.x * cvs.width;
@@ -611,9 +621,10 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
 
     // IF DRAWING: Map normalized hand position to user drawing canvas
     if (userDrawCanvasRef.current) {
-      const activePoint = (currentMode === 'three_finger' && data.threeFingerCentroid)
-        ? data.threeFingerCentroid
-        : data.indexTip;
+      const activePoint =
+        data.activeDrawPoint ||
+        (currentMode.includes('three_finger') && data.threeFingerCentroid) ||
+        data.indexTip;
 
       if (activePoint) {
         const px = activePoint.x * userDrawCanvasRef.current.width;
@@ -983,17 +994,26 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
                     <>
                       <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
                       <span className="flex items-center gap-1.5">
-                        ✍️ <strong className="text-white">القلم يرسم الآن</strong> (الأصابع مضمومة)
+                        ✍️ <strong className="text-white">القلم مثبّت ويرسم الآن</strong>
+                        <span className="text-emerald-300/80 font-normal">
+                          {gestureMode.includes('latch')
+                            ? '(افرد أصابعك للتوقف ✋)'
+                            : '(الأصابع مضمومة)'}
+                        </span>
                       </span>
                     </>
                   ) : (
                     <>
                       <span className="w-2 h-2 rounded-full bg-amber-400" />
                       <span className="flex items-center gap-1.5">
-                        ✋ <span>القلم مرفوع</span>
+                        ✋ <span>القلم متوقف</span>
                         <span className="text-slate-400 font-normal">
-                          {gestureMode === 'three_finger'
-                            ? '(ضم الـ 3 أصابع للرسم على المسار)'
+                          {gestureMode === 'three_finger_latch'
+                            ? '(ضم الـ 3 أصابع لبدء التثبيت والرسم)'
+                            : gestureMode === 'two_finger_latch'
+                            ? '(ضم الإصبعين للتثبيت)'
+                            : gestureMode === 'three_finger'
+                            ? '(ضم الـ 3 أصابع للرسم)'
                             : gestureMode === 'two_finger'
                             ? '(اقبض بالإصبعين للرسم)'
                             : '(حرّك السبابة للرسم)'}

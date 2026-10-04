@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { DrawingItem, DrawingResult, StudentProfile } from '../../types';
 import { drawingEngineService, GUIDE_LINE_COLORS } from '../../services/drawingEngineService';
 import { googleSheetsService } from '../../services/googleSheetsService';
-import { whiteboardSyncService } from '../../services/whiteboardSyncService';
+import { whiteboardSyncService, ConnectedStudent } from '../../services/whiteboardSyncService';
 import { ARDrawingCanvas } from './ARDrawingCanvas';
 import { DrawingAdminModal } from './DrawingAdminModal';
 import {
@@ -24,7 +24,14 @@ import {
   Play,
   Sliders,
   Check,
-  X
+  X,
+  Users,
+  Smartphone,
+  Tablet as TabletIcon,
+  Monitor,
+  Wifi,
+  Send,
+  Lock
 } from 'lucide-react';
 
 interface DrawingStudioProps {
@@ -55,30 +62,58 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
   const [currentBoardDrawingId, setCurrentBoardDrawingId] = useState<string>(() => whiteboardSyncService.getLatestDrawingId() || 'letter_alif');
   const [isBoardSessionActive, setIsBoardSessionActive] = useState(false);
 
-  // Subscribe to live student progress updates from smartboard
+  // Online Multi-Student Classroom Hub State
+  const [roomCode, setRoomCode] = useState<string>(() => whiteboardSyncService.getRoomCode() || '4821');
+  const [connectedStudents, setConnectedStudents] = useState<ConnectedStudent[]>([]);
+  const [targetStudentId, setTargetStudentId] = useState<string>('all');
+  const [isEditingRoomCode, setIsEditingRoomCode] = useState(false);
+  const [tempRoomInput, setTempRoomInput] = useState(roomCode);
+
+  // Initialize Teacher Role & Subscribe to live students list and progress
   useEffect(() => {
-    const unsub = whiteboardSyncService.subscribe((msg) => {
+    whiteboardSyncService.initRole('teacher', roomCode);
+
+    const unsubStudents = whiteboardSyncService.onStudentsChange((list) => {
+      setConnectedStudents(list);
+    });
+
+    const unsubMsg = whiteboardSyncService.subscribe((msg) => {
       if (msg.type === 'STUDENT_PROGRESS' && msg.payload) {
         setBoardLiveStats({
           accuracy: msg.payload.accuracy,
           coverage: msg.payload.coverage,
           drawingId: msg.payload.drawingId
         });
+      } else if (msg.type === 'STUDENT_FINISHED' && msg.payload) {
+        setCopiedFeedback(`🎉 أحسنت! أنهى الطالب «${msg.studentName || 'طالب'}» رسمة «${msg.payload.drawingTitle || ''}» بإتقان ${msg.payload.accuracy}%!`);
+        setTimeout(() => setCopiedFeedback(null), 5000);
       }
     });
-    return () => unsub();
-  }, []);
+
+    return () => {
+      unsubStudents();
+      unsubMsg();
+    };
+  }, [roomCode]);
+
+  const handleUpdateRoomCode = () => {
+    const cleaned = tempRoomInput.trim() || '4821';
+    setRoomCode(cleaned);
+    whiteboardSyncService.setRoomCode(cleaned);
+    whiteboardSyncService.initRole('teacher', cleaned);
+    setIsEditingRoomCode(false);
+    setCopiedFeedback(`تم تغيير رمز الغرفة إلى: ${cleaned} 📡`);
+    setTimeout(() => setCopiedFeedback(null), 3000);
+  };
 
   const getWhiteboardUrl = (drawingId?: string) => {
-    if (typeof window === 'undefined') return '';
-    const base = window.location.origin + window.location.pathname;
-    return drawingId ? `${base}?mode=whiteboard&drawing=${drawingId}` : `${base}?mode=whiteboard`;
+    return whiteboardSyncService.getWhiteboardUrl(drawingId, roomCode);
   };
 
   const handleCopyLink = (drawingId?: string) => {
     const url = getWhiteboardUrl(drawingId);
     navigator.clipboard.writeText(url);
-    setCopiedFeedback('تم نسخ رابط السبورة المستقلة إلى الحافظة! 📋');
+    setCopiedFeedback('تم نسخ رابط الطلاب للسبورة إلى الحافظة! 📋');
     setTimeout(() => setCopiedFeedback(null), 3000);
   };
 
@@ -87,36 +122,33 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
     window.open(url, '_blank', 'noopener,noreferrer');
   };
 
-  const handleSendToWhiteboard = (item: DrawingItem) => {
+  const handleSendToWhiteboard = (item: DrawingItem, studentId: string = targetStudentId) => {
     setCurrentBoardDrawingId(item.id);
     whiteboardSyncService.saveLatestDrawingId(item.id);
-    whiteboardSyncService.send({
-      type: 'SELECT_DRAWING',
-      payload: { drawingId: item.id }
-    });
-    setCopiedFeedback(`تم إرسال «${item.title}» إلى سبورة الطلاب بنجاح! 📡`);
+    whiteboardSyncService.sendDrawingToStudents(item, studentId);
+    const targetLabel = studentId === 'all' ? 'جميع الطلاب 📡' : `الطالب ${connectedStudents.find(s => s.id === studentId)?.name || ''} 🎯`;
+    setCopiedFeedback(`تم إرسال «${item.title}» إلى ${targetLabel}!`);
     setTimeout(() => setCopiedFeedback(null), 3000);
   };
 
   const handleRemoteToggleSession = () => {
     const nextState = !isBoardSessionActive;
     setIsBoardSessionActive(nextState);
-    whiteboardSyncService.send({
-      type: nextState ? 'START_SESSION' : 'FINISH_SESSION'
-    });
+    if (nextState) {
+      whiteboardSyncService.sendStartSession(targetStudentId);
+    } else {
+      whiteboardSyncService.sendFinishSession(targetStudentId);
+    }
   };
 
   const handleRemoteClearBoard = () => {
-    whiteboardSyncService.send({ type: 'CLEAR_BOARD' });
-    setCopiedFeedback('تم مسح لوحة الطالب عن بُعد! 🧹');
+    whiteboardSyncService.sendClearBoard(targetStudentId);
+    setCopiedFeedback('تم مسح لوحة الطلاب عن بُعد! 🧹');
     setTimeout(() => setCopiedFeedback(null), 2500);
   };
 
   const handleRemoteSetColor = (colorId: 'yellow' | 'green' | 'white' | 'cyan' | 'black') => {
-    whiteboardSyncService.send({
-      type: 'SET_GUIDE_COLOR',
-      payload: { color: colorId }
-    });
+    whiteboardSyncService.sendGuideColor(colorId, targetStudentId);
   };
 
   // Filter drawings
@@ -510,81 +542,237 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
         </div>
       )}
 
-      {/* Standalone Whiteboard Remote Control Modal */}
+      {/* Standalone & Online Classroom Remote Control Modal */}
       {showWhiteboardModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md overflow-y-auto">
-          <div className="w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200 flex flex-col my-auto max-h-[92vh]">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md overflow-y-auto">
+          <div className="w-full max-w-3xl bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200 flex flex-col my-auto max-h-[94vh]">
             
             {/* Header */}
             <div className="flex items-center justify-between border-b border-slate-800 pb-4">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-2xl bg-sky-500/20 text-sky-400 flex items-center justify-center shadow-inner">
-                  <Radio className="w-5 h-5 animate-pulse" />
+                <div className="w-11 h-11 rounded-2xl bg-sky-500/20 text-sky-400 flex items-center justify-center shadow-inner">
+                  <Radio className="w-6 h-6 animate-pulse" />
                 </div>
                 <div>
-                  <h3 className="text-base font-extrabold text-white font-serif flex items-center gap-2">
-                    <span>سبورة العرض التفاعلية المستقلة (Smart Board Display)</span>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-500/30">
-                      بث مباشر
+                  <h3 className="text-base sm:text-lg font-black text-white font-serif flex items-center gap-2">
+                    <span>إدارة الصف والسبورات التفاعلية (Online Classroom Hub)</span>
+                    <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-500/40 font-bold flex items-center gap-1">
+                      <Wifi className="w-2.5 h-2.5 animate-pulse text-emerald-400" />
+                      <span>سحابي مباشر (Vercel & P2P)</span>
                     </span>
                   </h3>
                   <p className="text-xs text-slate-400">
-                    رابط مستقل مخصص لشاشات البروجيكتور والسبورات الذكية: التحكم عندك والطالب فقط يرسم.
+                    التحكم الكامل عندك كمعلم، والطلاب يرسمون في بيوتهم أو فصولهم عبر الجوال والتابلت باستقلالية تامة.
                   </p>
                 </div>
               </div>
 
               <button
                 onClick={() => setShowWhiteboardModal(false)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Standalone Link Section */}
-            <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-3">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-slate-300 flex items-center gap-1.5">
-                  <ExternalLink className="w-3.5 h-3.5 text-sky-400" />
-                  <span>الرابط المستقل لشاشة السبورة أمام الطلاب:</span>
-                </span>
-                <span className="text-[11px] text-slate-500">يعمل على أي شاشة/متصفح</span>
+            {/* Room Code & Student Share Link Section */}
+            <div className="p-4 rounded-2xl bg-slate-950/90 border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between text-xs flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-300 flex items-center gap-1.5">
+                    <Wifi className="w-3.5 h-3.5 text-sky-400" />
+                    <span>رمز غرفة الدرس:</span>
+                  </span>
+                  {!isEditingRoomCode ? (
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-sm font-extrabold text-amber-400 bg-slate-900 px-3 py-1 rounded-lg border border-slate-700">
+                        {roomCode}
+                      </span>
+                      <button
+                        onClick={() => {
+                          setTempRoomInput(roomCode);
+                          setIsEditingRoomCode(true);
+                        }}
+                        className="text-[11px] text-sky-400 hover:text-sky-300 underline"
+                      >
+                        تعديل
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="text"
+                        value={tempRoomInput}
+                        onChange={(e) => setTempRoomInput(e.target.value)}
+                        className="w-24 px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-xs font-mono text-white text-center"
+                        maxLength={8}
+                      />
+                      <button
+                        onClick={handleUpdateRoomCode}
+                        className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 text-xs font-bold"
+                      >
+                        حفظ
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="text-[11px] text-emerald-400 font-bold flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                  <span>مجاني 100% ويعمل بدون خوادم مدفوعة</span>
+                </div>
               </div>
 
+              {/* Shareable Link Input */}
               <div className="flex items-center gap-2">
                 <input
                   type="text"
                   readOnly
                   value={getWhiteboardUrl()}
-                  className="flex-1 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs font-mono text-sky-300 select-all focus:outline-none"
+                  className="flex-1 px-3.5 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs font-mono text-sky-300 select-all focus:outline-none"
                 />
                 <button
                   onClick={() => handleCopyLink()}
-                  className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                  className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow"
                 >
                   <Copy className="w-3.5 h-3.5" />
-                  <span>نسخ الرابط</span>
+                  <span>نسخ رابط الطلاب</span>
                 </button>
                 <button
                   onClick={() => handleOpenWhiteboardWindow()}
                   className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow"
+                  title="فتح سبورة تجريبية للطالب في نافذة ثانية"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
-                  <span>فتح الآن 🖥️</span>
+                  <span>تجربة كطالب 🖥️</span>
                 </button>
               </div>
 
               <p className="text-[11px] text-slate-400 leading-relaxed">
-                💡 <strong>طريقة العرض الموصى بها:</strong> افتح هذا الرابط في نافذة مستقلة واسحبها إلى شاشة البروجيكتور أو السبورة الذكية (وضع توسيع الشاشة Extend Display)، واضغط زر ملء الشاشة. ستبقى لوحة التحكم هذه أمامك على حاسوبك!
+                💡 <strong>طريقة التعليم أونلاين:</strong> انسخ الرابط وأرسله لطلابك (عبر Zoom / Teams / WhatsApp). يفتح كل طالب الرابط من جواله أو التابلت في بيته ويكتب اسمه، وسيظهر أمامك مباشرة في الرادار أدناه مع نسبة إتقانه ودرجاته لحظياً!
               </p>
+            </div>
+
+            {/* Live Connected Students Radar */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-emerald-400" />
+                  <span className="text-xs font-bold text-white">الطلاب المتصلون في الغرفة الآن:</span>
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-emerald-300 font-mono font-bold border border-slate-700">
+                    {connectedStudents.length} متصل 🟢
+                  </span>
+                </div>
+
+                {/* Target Audience Selector */}
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className="text-slate-400 text-[11px]">إرسال الأوامر إلى:</span>
+                  <select
+                    value={targetStudentId}
+                    onChange={(e) => setTargetStudentId(e.target.value)}
+                    className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-700 text-xs text-amber-300 font-bold outline-none cursor-pointer"
+                  >
+                    <option value="all">جميع الطلاب في الصف (بث جماعي 📡)</option>
+                    {connectedStudents.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.deviceType === 'mobile' ? 'جوال' : s.deviceType === 'tablet' ? 'تابلت' : 'كمبيوتر'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Students Grid */}
+              {connectedStudents.length === 0 ? (
+                <div className="p-5 rounded-2xl bg-slate-950/60 border border-dashed border-slate-800 text-center space-y-1">
+                  <p className="text-xs font-semibold text-slate-300">
+                    في انتظار انضمام الطلاب عبر الرابط...
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    أرسل الرابط بالأعلى للطلاب في بيوتهم ليدخلوا فوراً من أي جوال أو تابلت بدون برامج إضافية.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 max-h-48 overflow-y-auto p-1">
+                  {connectedStudents.map((std) => (
+                    <div
+                      key={std.id}
+                      className={`p-3 rounded-2xl border transition-all ${
+                        targetStudentId === std.id
+                          ? 'bg-amber-950/40 border-amber-500/80 ring-2 ring-amber-400/40'
+                          : 'bg-slate-950/80 border-slate-800'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <div className="w-7 h-7 rounded-xl bg-slate-800 flex items-center justify-center text-slate-300">
+                            {std.deviceType === 'mobile' ? (
+                              <Smartphone className="w-3.5 h-3.5 text-sky-400" />
+                            ) : std.deviceType === 'tablet' ? (
+                              <TabletIcon className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : (
+                              <Monitor className="w-3.5 h-3.5 text-amber-400" />
+                            )}
+                          </div>
+                          <div>
+                            <div className="text-xs font-extrabold text-white truncate max-w-[110px]">{std.name}</div>
+                            <div className="text-[10px] text-slate-400 font-mono">
+                              {std.deviceType === 'mobile' ? '📱 جوال' : std.deviceType === 'tablet' ? '📟 تابلت' : '💻 كمبيوتر'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <span
+                          className={`text-[9px] px-2 py-0.5 rounded-full font-bold ${
+                            std.status === 'drawing'
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40 animate-pulse'
+                              : std.status === 'finished'
+                              ? 'bg-amber-950 text-amber-300 border border-amber-500/40'
+                              : 'bg-slate-800 text-slate-300'
+                          }`}
+                        >
+                          {std.status === 'drawing' ? '✍️ يرسم الآن' : std.status === 'finished' ? '🏆 مكتمل' : '🟢 مستعد'}
+                        </span>
+                      </div>
+
+                      {/* Live accuracy meter */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-slate-400 truncate max-w-[100px]">{std.currentDrawingTitle || 'في الانتظار'}</span>
+                          <span className="font-mono font-bold text-emerald-400">{std.accuracy}% إتقان</span>
+                        </div>
+                        <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-sky-400 to-emerald-400 transition-all duration-300"
+                            style={{ width: `${std.accuracy}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="mt-2 pt-2 border-t border-slate-900 flex items-center justify-between text-[10px]">
+                        <button
+                          onClick={() => setTargetStudentId(std.id)}
+                          className="text-amber-400 hover:text-amber-300 font-bold"
+                        >
+                          {targetStudentId === std.id ? '✓ محدد حالياً' : 'تحديد هذا الطالب 🎯'}
+                        </button>
+                        {std.score > 0 && (
+                          <span className="text-amber-300 font-bold">+{std.score} نقطة</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Remote Teacher Controls */}
             <div className="space-y-3">
               <h4 className="text-xs font-bold text-slate-300 flex items-center gap-2">
                 <Sliders className="w-4 h-4 text-amber-400" />
-                <span>التحكم عن بُعد في سبورة الطلاب (الكونسول اللحظي):</span>
+                <span>
+                  أوامر التحكم عن بُعد ({targetStudentId === 'all' ? 'لكل الطلاب 📡' : `للطالب ${connectedStudents.find(s => s.id === targetStudentId)?.name || ''}`}):
+                </span>
               </h4>
 
               {/* Action buttons */}
@@ -600,12 +788,12 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
                   {!isBoardSessionActive ? (
                     <>
                       <Play className="w-4 h-4 fill-current text-emerald-400" />
-                      <span>بدء جلسة الرسم للسبورة 🟢</span>
+                      <span>بدء جلسة الرسم للجميع 🟢</span>
                     </>
                   ) : (
                     <>
                       <CheckCircle2 className="w-4 h-4 text-rose-400" />
-                      <span>إنهاء وحساب النتيجة 🔴</span>
+                      <span>إنهاء وحفظ النتيجة 🔴</span>
                     </>
                   )}
                 </button>
@@ -615,11 +803,11 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
                   className="p-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer"
                 >
                   <RefreshCw className="w-4 h-4 text-slate-400" />
-                  <span>مسح لوحة الطالب 🧹</span>
+                  <span>مسح لوحات الطلاب 🧹</span>
                 </button>
 
                 <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-around col-span-2 sm:col-span-1">
-                  <span className="text-[11px] text-slate-400 font-semibold">لون الخط:</span>
+                  <span className="text-[11px] text-slate-400 font-semibold">لون خط الإرشاد:</span>
                   <div className="flex items-center gap-1.5">
                     {GUIDE_LINE_COLORS.map((c) => (
                       <button
@@ -633,39 +821,14 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
                   </div>
                 </div>
               </div>
-
-              {/* Live Student Radar Monitor */}
-              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800/80 flex items-center justify-between">
-                <div>
-                  <div className="text-[11px] text-slate-400 font-medium">متابعة إتقان الطالب اللحظية من السبورة:</div>
-                  <div className="text-xs text-white font-semibold mt-0.5">
-                    {boardLiveStats ? `الرسمة الحالية: ${allDrawings.find(d => d.id === boardLiveStats.drawingId)?.title || 'حرف الألف'}` : 'في انتظار بدء رسم الطالب...'}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <div className="text-center px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800">
-                    <div className="text-[10px] text-slate-500 font-bold">التغطية</div>
-                    <div className="text-base font-extrabold font-mono text-sky-400">
-                      {boardLiveStats?.coverage ?? 0}%
-                    </div>
-                  </div>
-                  <div className="text-center px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800">
-                    <div className="text-[10px] text-slate-500 font-bold">نسبة الثبات</div>
-                    <div className="text-base font-extrabold font-mono text-emerald-400">
-                      {boardLiveStats?.accuracy ?? 0}%
-                    </div>
-                  </div>
-                </div>
-              </div>
             </div>
 
             {/* Quick Template Broadcast list */}
             <div>
               <div className="text-xs font-bold text-slate-300 mb-2">
-                اختر الرسمة أو الحرف لإرسالها فوراً إلى سبورة العرض:
+                اختر الرسمة أو الحرف لإرسالها فوراً إلى أجهزة الطلاب ({targetStudentId === 'all' ? 'للجميع 📡' : 'للطالب المحدد 🎯'}):
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 max-h-48 overflow-y-auto p-1">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 max-h-44 overflow-y-auto p-1">
                 {allDrawings.slice(0, 8).map((item) => (
                   <button
                     key={item.id}
@@ -680,10 +843,13 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
             </div>
 
             {/* Footer */}
-            <div className="border-t border-slate-800 pt-3 flex items-center justify-end">
+            <div className="border-t border-slate-800 pt-3 flex items-center justify-between">
+              <span className="text-[11px] text-slate-500">
+                تسجيل النتائج مستمر تلقائياً في Google Sheets «ورقة_الرسم»
+              </span>
               <button
                 onClick={() => setShowWhiteboardModal(false)}
-                className="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold"
+                className="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition-colors"
               >
                 إغلاق
               </button>

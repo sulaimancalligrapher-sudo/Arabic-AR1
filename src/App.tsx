@@ -46,11 +46,11 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'lessons' | 'activities' | 'progress' | 'drawing'>('lessons');
   const [activeLesson, setActiveLesson] = useState<Lesson | null>(null);
 
-  // Standalone Smart Board / Whiteboard Mode (?mode=whiteboard)
+  // Standalone Smart Board / Whiteboard Mode (?mode=whiteboard or ?room=...)
   const [isWhiteboardMode, setIsWhiteboardMode] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
-      return params.get('mode') === 'whiteboard' || params.get('view') === 'board';
+      return params.get('mode') === 'whiteboard' || params.get('view') === 'board' || !!params.get('room');
     }
     return false;
   });
@@ -157,6 +157,7 @@ export default function App() {
             const url = new URL(window.location.href);
             url.searchParams.delete('mode');
             url.searchParams.delete('view');
+            url.searchParams.delete('room');
             window.history.pushState({}, '', url.pathname);
           }
         }}
