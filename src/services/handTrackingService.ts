@@ -106,6 +106,7 @@ class HandTrackingService {
   private lastFpsCalcTime: number = Date.now();
   private currentFps: number = 0;
   private lightLevel: 'dark' | 'good' | 'bright' = 'good';
+  private isPaused: boolean = false;
 
   // Brightness filter level (1.0 = normal, 1.5 = boosted, 2.0 = extra bright, 2.5 = max)
   private brightnessMultiplier: number = 1.5;
@@ -349,6 +350,22 @@ class HandTrackingService {
       // Efficient frame loop with zero queue backlog
       const processLoop = async () => {
         if (!this.isRunning || !this.videoElement || !this.hands) return;
+
+        // If paused (e.g. Pure Whiteboard direct touch/mouse drawing mode), sleep to free 100% CPU/GPU
+        if (this.isPaused) {
+          if (this.isRunning && this.videoElement) {
+            setTimeout(() => {
+              if (this.isRunning && this.videoElement) {
+                if ('requestVideoFrameCallback' in this.videoElement) {
+                  (this.videoElement as any).requestVideoFrameCallback(processLoop);
+                } else {
+                  requestAnimationFrame(processLoop);
+                }
+              }
+            }, 120);
+          }
+          return;
+        }
 
         if (!this.isProcessingFrame && this.videoElement.readyState >= 2) {
           this.isProcessingFrame = true;
@@ -662,6 +679,20 @@ class HandTrackingService {
     if (this.callback) {
       this.callback(this.latestData);
     }
+  }
+
+  /**
+   * Pause MediaPipe frame sending to liberate 100% CPU/GPU for smooth direct touch/mouse drawing
+   */
+  public pauseProcessing() {
+    this.isPaused = true;
+  }
+
+  /**
+   * Resume MediaPipe frame processing immediately
+   */
+  public resumeProcessing() {
+    this.isPaused = false;
   }
 
   /**

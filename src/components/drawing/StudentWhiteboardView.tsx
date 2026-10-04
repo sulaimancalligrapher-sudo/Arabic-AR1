@@ -152,6 +152,18 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
   const lastDrawPosRef = useRef<{ x: number; y: number } | null>(null);
   const startTimeRef = useRef(Date.now());
   const lastProgressReportRef = useRef(0);
+  const lastAccuracyUpdateRef = useRef(0);
+  const latestAccuracyRef = useRef(0);
+  const latestCoverageRef = useRef(0);
+
+  // Pause / Resume MediaPipe camera tracking when switching between Hand tracking and Whiteboard
+  useEffect(() => {
+    if (inputMethod === 'touch_mouse') {
+      handTrackingService.pauseProcessing();
+    } else {
+      handTrackingService.resumeProcessing();
+    }
+  }, [inputMethod]);
 
   // Detect mobile / tablet
   useEffect(() => {
@@ -460,7 +472,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     }
 
     const duration = Math.max(5, Math.round((Date.now() - startTimeRef.current) / 1000));
-    const finalAcc = accuracy || 80;
+    const finalAcc = latestAccuracyRef.current || accuracy || 80;
     const earnedScore = Math.round((currentDrawing.points * finalAcc) / 100);
 
     const resultRecord: DrawingResult = {
@@ -489,15 +501,27 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     });
   };
 
-  const handleToggleButton = () => {
+  const handleToggleButton = useCallback(() => {
+    const now = Date.now();
+    if (now - lastButtonTriggerRef.current < 500) {
+      return;
+    }
+    lastButtonTriggerRef.current = now;
+
     if (!isSessionActiveRef.current) {
       startDrawingSession();
     } else {
       finishDrawingSession();
     }
-  };
+  }, []);
 
-  // Process stroke point
+  // Flush pending throttled accuracy / score updates immediately (e.g. on stroke end or finish)
+  const flushAccuracyUpdate = useCallback(() => {
+    setCoverage(latestCoverageRef.current);
+    setAccuracy(latestAccuracyRef.current);
+  }, []);
+
+  // Process stroke point with high-speed squared distance and row pruning
   const processDrawPoint = useCallback((pixelX: number, pixelY: number) => {
     if (!isSessionActiveRef.current || isFinishedRef.current || !analysisRef.current || !userDrawCanvasRef.current) return;
 
@@ -524,8 +548,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
 
     lastDrawPosRef.current = { x: pixelX, y: pixelY };
 
-    // Hit test with tolerance radius
+    // Optimized hit test with squared radius & row pre-filtering
     const radius = drawingEngineService.getToleranceRadius(currentDrawing.tolerance);
+    const radiusSq = radius * radius;
     let hitFound = false;
 
     const startX = Math.max(0, Math.floor(pixelX - radius));
@@ -534,10 +559,15 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     const endY = Math.min(height - 1, Math.ceil(pixelY + radius));
 
     for (let y = startY; y <= endY; y++) {
+      const dy = y - pixelY;
+      const dySq = dy * dy;
+      if (dySq > radiusSq) continue;
+      const yOffset = y * width;
+
       for (let x = startX; x <= endX; x++) {
-        const dist = Math.hypot(x - pixelX, y - pixelY);
-        if (dist <= radius) {
-          const index = y * width + x;
+        const dx = x - pixelX;
+        if (dx * dx + dySq <= radiusSq) {
+          const index = yOffset + x;
           if (targetMask[index] === 1) {
             coveredSetRef.current.add(index);
             hitFound = true;
@@ -553,7 +583,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
 
     const currentCovered = coveredSetRef.current.size;
     const covRatio = Math.min(100, Math.round((currentCovered / totalTargetPixels) * 100));
-    setCoverage(covRatio);
+    latestCoverageRef.current = covRatio;
 
     const steadiness =
       totalSamplesRef.current > 0
@@ -561,11 +591,18 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
         : 100;
 
     const currentAccuracy = Math.min(100, Math.round(covRatio * 0.7 + steadiness * 0.3));
-    setAccuracy(currentAccuracy);
+    latestAccuracyRef.current = currentAccuracy;
+
+    // Throttle React state re-renders to 10 FPS to maintain 120 FPS buttery-smooth drawing on mobile/tablets
+    const now = Date.now();
+    if (now - lastAccuracyUpdateRef.current > 100) {
+      lastAccuracyUpdateRef.current = now;
+      setCoverage(covRatio);
+      setAccuracy(currentAccuracy);
+    }
 
     // Throttled progress report to teacher dashboard
-    const now = Date.now();
-    if (now - lastProgressReportRef.current > 450) {
+    if (now - lastProgressReportRef.current > 500) {
       lastProgressReportRef.current = now;
       whiteboardSyncService.reportProgress({
         accuracy: currentAccuracy,
@@ -577,36 +614,78 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     }
   }, [brushColor, brushSize, currentDrawing.id, currentDrawing.title, currentDrawing.tolerance]);
 
-  // Pointer & mouse events for Pure Whiteboard direct drawing mode (Stylus, Finger, Mouse)
+  // Exact subpixel coordinate mapping for touchscreen, stylus & mouse
+  // Corrects for CSS object-contain letterboxing/pillarboxing so the pen is 100% directly beneath the finger!
+  const getCanvasCoordinates = useCallback((clientX: number, clientY: number) => {
+    const canvas = userDrawCanvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+
+    const canvasW = canvas.width;
+    const canvasH = canvas.height;
+    if (canvasW <= 0 || canvasH <= 0) return null;
+
+    const canvasAspect = canvasW / canvasH;
+    const rectAspect = rect.width / rect.height;
+
+    let actualW = rect.width;
+    let actualH = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    // Account for browser object-contain letterboxing & pillarboxing
+    if (canvasAspect > rectAspect) {
+      // Letterbox top and bottom
+      actualW = rect.width;
+      actualH = rect.width / canvasAspect;
+      offsetX = 0;
+      offsetY = (rect.height - actualH) / 2;
+    } else {
+      // Pillarbox left and right
+      actualH = rect.height;
+      actualW = rect.height * canvasAspect;
+      offsetX = (rect.width - actualW) / 2;
+      offsetY = 0;
+    }
+
+    const displayedLeft = rect.left + offsetX;
+    const displayedTop = rect.top + offsetY;
+
+    const clampedX = Math.max(displayedLeft, Math.min(displayedLeft + actualW, clientX));
+    const clampedY = Math.max(displayedTop, Math.min(displayedTop + actualH, clientY));
+
+    const px = ((clampedX - displayedLeft) / actualW) * canvasW;
+    const py = ((clampedY - displayedTop) / actualH) * canvasH;
+
+    return { px, py };
+  }, []);
+
+  // Pointer events for Pure Whiteboard direct drawing mode (Stylus, Touch, Mouse)
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (inputMethodRef.current !== 'touch_mouse') return;
     if (!isSessionActiveRef.current || isFinishedRef.current || !userDrawCanvasRef.current) return;
+    
     isPointerDownRef.current = true;
     setIsPenDown(true);
     try {
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      e.currentTarget.setPointerCapture(e.pointerId);
     } catch {}
 
-    const canvas = userDrawCanvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const px = (e.clientX - rect.left) * scaleX;
-    const py = (e.clientY - rect.top) * scaleY;
-    processDrawPoint(px, py);
+    const coords = getCanvasCoordinates(e.clientX, e.clientY);
+    if (coords) {
+      processDrawPoint(coords.px, coords.py);
+    }
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (inputMethodRef.current !== 'touch_mouse') return;
     if (!isPointerDownRef.current || !isSessionActiveRef.current || isFinishedRef.current || !userDrawCanvasRef.current) return;
 
-    const canvas = userDrawCanvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const px = (e.clientX - rect.left) * scaleX;
-    const py = (e.clientY - rect.top) * scaleY;
-    processDrawPoint(px, py);
+    const coords = getCanvasCoordinates(e.clientX, e.clientY);
+    if (coords) {
+      processDrawPoint(coords.px, coords.py);
+    }
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -615,31 +694,11 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     setIsPenDown(false);
     lastDrawPosRef.current = null;
     try {
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
     } catch {}
-  };
-
-  // Touch & stylus support for tablets & mobile
-  const handleTouchDraw = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    if (!isSessionActiveRef.current || isFinishedRef.current || !userDrawCanvasRef.current) return;
-    const canvas = userDrawCanvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const touch = e.touches[0];
-    if (!touch) return;
-
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const px = (touch.clientX - rect.left) * scaleX;
-    const py = (touch.clientY - rect.top) * scaleY;
-
-    processDrawPoint(px, py);
-  };
-
-  const handleTouchEnd = () => {
-    lastDrawPosRef.current = null;
-    if (inputMethodRef.current === 'touch_mouse') {
-      setIsPenDown(false);
-    }
+    flushAccuracyUpdate();
   };
 
   // Hand tracking update callback with Smart Latch logic
@@ -1165,7 +1224,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             />
           )}
 
-          {/* Layer 3: Student Live Drawing Canvas (Universal Touch, Pointer & Mouse Drag) */}
+          {/* Layer 3: Student Live Drawing Canvas (Universal Touch, Stylus, Pointer & Mouse Drag) */}
           {flowState === 'drawing' && (
             <canvas
               ref={userDrawCanvasRef}
@@ -1175,10 +1234,8 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
               onPointerCancel={handlePointerUp}
-              onTouchMove={handleTouchDraw}
-              onTouchEnd={handleTouchEnd}
               className={`absolute inset-0 w-full h-full object-contain cursor-crosshair z-20 touch-none ${
-                inputMethod === 'touch_mouse' ? 'pointer-events-auto' : ''
+                inputMethod === 'touch_mouse' ? 'pointer-events-auto' : 'pointer-events-none'
               }`}
             />
           )}
@@ -1193,20 +1250,17 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             }`}
           />
 
-          {/* Interactive In-Canvas Button (Start / Finish Session - only when in drawing mode) */}
+          {/* Interactive In-Canvas Button (Start / Finish Session - Single word with icon) */}
           {flowState === 'drawing' && (
             <button
               ref={actionButtonRef}
               type="button"
               onClick={(e) => {
+                e.preventDefault();
                 e.stopPropagation();
                 handleToggleButton();
               }}
-              onTouchStart={(e) => {
-                e.stopPropagation();
-                handleToggleButton();
-              }}
-              className={`absolute top-3 sm:top-4 right-3 sm:right-4 z-50 pointer-events-auto px-3 sm:px-4 py-2 sm:py-2.5 rounded-2xl border-2 flex items-center gap-2.5 transition-all duration-200 cursor-pointer shadow-2xl backdrop-blur-md select-none ${
+              className={`absolute top-3 sm:top-4 right-3 sm:right-4 z-50 pointer-events-auto px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-2xl border-2 flex items-center gap-2 transition-all duration-200 cursor-pointer shadow-2xl backdrop-blur-md select-none ${
                 buttonFeedback
                   ? 'scale-95 ring-8 ring-amber-400 bg-amber-400 text-slate-950'
                   : !isSessionActive
@@ -1218,25 +1272,25 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
                   : 'bg-rose-950/90 border-rose-500/80 text-rose-200 hover:bg-rose-900/90'
               }`}
             >
-              <div
-                className={`w-6 h-6 sm:w-7 sm:h-7 rounded-xl flex items-center justify-center font-bold shadow ${
-                  !isSessionActive ? 'bg-emerald-500 text-slate-950' : 'bg-rose-500 text-white'
-                }`}
-              >
-                {!isSessionActive ? <Play className="w-3.5 h-3.5 fill-current" /> : <CheckCircle2 className="w-4 h-4" />}
-              </div>
-              <div className="text-right">
-                <div className="text-xs sm:text-sm font-extrabold leading-none">
-                  {!isSessionActive ? 'ابدأ الرسم الآن' : 'إنهاء وحفظ النتيجة'}
-                </div>
-                <div className="text-[9px] sm:text-[10px] text-slate-400 mt-0.5">
-                  {!isSessionActive
-                    ? inputMethod === 'touch_mouse'
-                      ? 'انقر للبدء 🚀'
-                      : 'اقبض بإصبعين 🤏 للنقر'
-                    : 'اضغط للنهاية والاحتفال'}
-                </div>
-              </div>
+              {!isSessionActive ? (
+                <>
+                  <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-xl bg-emerald-500 text-slate-950 flex items-center justify-center font-bold shadow shrink-0">
+                    <Play className="w-3.5 h-3.5 sm:w-4 sm:h-4 fill-current ml-0.5" />
+                  </div>
+                  <span className="text-xs sm:text-sm font-black text-emerald-100 leading-none">
+                    ابدأ
+                  </span>
+                </>
+              ) : (
+                <>
+                  <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-xl bg-rose-500 text-white flex items-center justify-center font-bold shadow shrink-0">
+                    <CheckCircle2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                  </div>
+                  <span className="text-xs sm:text-sm font-black text-rose-100 leading-none">
+                    إنهاء
+                  </span>
+                </>
+              )}
             </button>
           )}
 
