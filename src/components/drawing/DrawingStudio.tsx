@@ -31,7 +31,12 @@ import {
   Monitor,
   Wifi,
   Send,
-  Lock
+  Lock,
+  Hand,
+  PenTool,
+  Eye,
+  EyeOff,
+  LogOut
 } from 'lucide-react';
 
 interface DrawingStudioProps {
@@ -61,6 +66,8 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
   const [boardLiveStats, setBoardLiveStats] = useState<{ accuracy: number; coverage: number; drawingId: string } | null>(null);
   const [currentBoardDrawingId, setCurrentBoardDrawingId] = useState<string>(() => whiteboardSyncService.getLatestDrawingId() || 'letter_alif');
   const [isBoardSessionActive, setIsBoardSessionActive] = useState(false);
+  const [teacherInputMethod, setTeacherInputMethod] = useState<'hand' | 'touch_mouse'>('hand');
+  const [showStudentInputToggle, setShowStudentInputToggle] = useState<boolean>(false);
 
   // Online Multi-Student Classroom Hub State
   const [roomCode, setRoomCode] = useState<string>(() => whiteboardSyncService.getRoomCode() || '4821');
@@ -157,6 +164,41 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
 
   const handleRemoteSetColor = (colorId: 'yellow' | 'green' | 'white' | 'cyan' | 'black') => {
     whiteboardSyncService.sendGuideColor(colorId, targetStudentId);
+  };
+
+  const handleToggleStudentInputToggleVisibility = () => {
+    const nextState = !showStudentInputToggle;
+    setShowStudentInputToggle(nextState);
+    whiteboardSyncService.sendStudentInputToggleVisibility(nextState, targetStudentId);
+    setCopiedFeedback(
+      nextState
+        ? 'تم إظهار زر التبديل في صفحة الطلاب بنجاح! 👁️'
+        : 'تم إخفاء زر التبديل من صفحة الطلاب (الوضع الافتراضي)! 👁️‍🗨️'
+    );
+    setTimeout(() => setCopiedFeedback(null), 3000);
+  };
+
+  const handleRemoteSetInputMethod = (method: 'hand' | 'touch_mouse') => {
+    setTeacherInputMethod(method);
+    whiteboardSyncService.sendInputMethod(method, targetStudentId);
+    const label = method === 'hand' ? 'حركة اليد أمام الكاميرا ✋' : 'السبورة البيضاء (لمس / ماوس) 🖌️';
+    setCopiedFeedback(`تم ضبط طريقة رسم الطلاب إلى: «${label}» بنجاح!`);
+    setTimeout(() => setCopiedFeedback(null), 3000);
+  };
+
+  const handleRemoteEndLessonAndExit = () => {
+    whiteboardSyncService.sendEndLessonAndExit(targetStudentId);
+    setIsBoardSessionActive(false);
+    // Mark connected students as finished
+    setConnectedStudents(prev =>
+      prev.map(s =>
+        targetStudentId === 'all' || s.id === targetStudentId
+          ? { ...s, status: 'finished' }
+          : s
+      )
+    );
+    setCopiedFeedback('تم إنهاء الدرس بنجاح، حفظ درجات جميع الطلاب في Google Sheets، وإخراجهم من لوحة الرسم! 🛑');
+    setTimeout(() => setCopiedFeedback(null), 5000);
   };
 
   // Filter drawings
@@ -796,7 +838,7 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
               </h4>
 
               {/* Action buttons */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 <button
                   onClick={handleRemoteToggleSession}
                   className={`p-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
@@ -808,7 +850,7 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
                   {!isBoardSessionActive ? (
                     <>
                       <Play className="w-4 h-4 fill-current text-emerald-400" />
-                      <span>بدء جلسة الرسم للجميع 🟢</span>
+                      <span>بدء جلسة الرسم 🟢</span>
                     </>
                   ) : (
                     <>
@@ -819,15 +861,24 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
                 </button>
 
                 <button
+                  onClick={handleRemoteEndLessonAndExit}
+                  className="p-3 rounded-2xl bg-rose-950/90 border border-rose-500/80 text-rose-200 hover:bg-rose-900 text-xs font-black flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg shadow-rose-950/40"
+                  title="إنهاء الدرس الحالي فوراً وحفظ درجات الطلاب وإخراجهم من اللوحة"
+                >
+                  <LogOut className="w-4 h-4 text-rose-400" />
+                  <span>إنهاء الدرس وإخراج الطلاب 🛑</span>
+                </button>
+
+                <button
                   onClick={handleRemoteClearBoard}
                   className="p-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer"
                 >
                   <RefreshCw className="w-4 h-4 text-slate-400" />
-                  <span>مسح لوحات الطلاب 🧹</span>
+                  <span>مسح اللوحات 🧹</span>
                 </button>
 
-                <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-around col-span-2 sm:col-span-1">
-                  <span className="text-[11px] text-slate-400 font-semibold">لون خط الإرشاد:</span>
+                <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-around">
+                  <span className="text-[11px] text-slate-400 font-semibold">خط الإرشاد:</span>
                   <div className="flex items-center gap-1.5">
                     {GUIDE_LINE_COLORS.map((c) => (
                       <button
@@ -840,6 +891,77 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
                     ))}
                   </div>
                 </div>
+              </div>
+
+              {/* Student Input Mode Control with Eye Visibility Toggle (Request 3) */}
+              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between text-xs flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <Sliders className="w-4 h-4 text-amber-400" />
+                    <span className="font-bold text-slate-200">
+                      طريقة رسم الطلاب ({targetStudentId === 'all' ? 'لكل الطلاب 📡' : 'للطالب المحدد 🎯'}):
+                    </span>
+                  </div>
+
+                  {/* Eye Icon to Toggle Visibility on Student Screen */}
+                  <button
+                    onClick={handleToggleStudentInputToggleVisibility}
+                    className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      showStudentInputToggle
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-md ring-2 ring-amber-400/20'
+                        : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-slate-200'
+                    }`}
+                    title={
+                      showStudentInputToggle
+                        ? 'الزر ظاهر حالياً في صفحة الطالب (انقر لإخفائه)'
+                        : 'الزر مخفي حالياً من صفحة الطالب - افتراضي (انقر لإظهاره)'
+                    }
+                  >
+                    {showStudentInputToggle ? (
+                      <>
+                        <Eye className="w-3.5 h-3.5 text-amber-400" />
+                        <span>ظاهر في صفحة الطالب 👁️</span>
+                      </>
+                    ) : (
+                      <>
+                        <EyeOff className="w-3.5 h-3.5 text-slate-400" />
+                        <span>مخفي من صفحة الطالب (افتراضي) 👁️‍🗨️</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* Input Mode Selector Buttons */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => handleRemoteSetInputMethod('hand')}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                      teacherInputMethod === 'hand'
+                        ? 'bg-sky-600 text-white border-sky-400 shadow-md ring-2 ring-sky-400/30 font-black'
+                        : 'bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800'
+                    }`}
+                  >
+                    <Hand className="w-3.5 h-3.5" />
+                    <span>حركة اليد أمام الكاميرا ✋</span>
+                  </button>
+
+                  <button
+                    onClick={() => handleRemoteSetInputMethod('touch_mouse')}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                      teacherInputMethod === 'touch_mouse'
+                        ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-md ring-2 ring-amber-400/30 font-black'
+                        : 'bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800'
+                    }`}
+                  >
+                    <PenTool className="w-3.5 h-3.5" />
+                    <span>السبورة البيضاء (لمس / ماوس) 🖌️</span>
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  {showStudentInputToggle
+                    ? '💡 زر التبديل ظاهر حالياً في شاشة الطالب ويمكنه التبديل بنفسه، أو يمكنك فرضه من هنا.'
+                    : '💡 زر التبديل مخفي افتراضياً من شاشة الطالب لمنع تشتيته. يمكنك النقر على «العين» لإظهاره للطالب.'}
+                </p>
               </div>
             </div>
 

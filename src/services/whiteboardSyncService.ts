@@ -32,6 +32,9 @@ export interface WhiteboardSyncMessage {
     | 'SET_GUIDE_COLOR'
     | 'SET_BRUSH_SIZE'
     | 'SET_SENSITIVITY'
+    | 'SET_INPUT_METHOD'
+    | 'SET_STUDENT_INPUT_TOGGLE_VISIBLE'
+    | 'END_LESSON_AND_EXIT'
     | 'STUDENT_JOIN'
     | 'STUDENT_LEAVE'
     | 'STUDENT_HEARTBEAT'
@@ -509,6 +512,38 @@ class WhiteboardSyncService {
       type: 'SET_GUIDE_COLOR',
       targetStudentId,
       payload: { color }
+    });
+  }
+
+  /**
+   * Teacher helper: Remotely set student input method (hand tracking vs whiteboard touch/mouse)
+   */
+  public sendInputMethod(method: 'hand' | 'touch_mouse', targetStudentId: string = 'all') {
+    this.send({
+      type: 'SET_INPUT_METHOD',
+      targetStudentId,
+      payload: { method }
+    });
+  }
+
+  /**
+   * Teacher helper: Control visibility of the input toggle button on the student's page
+   */
+  public sendStudentInputToggleVisibility(visible: boolean, targetStudentId: string = 'all') {
+    this.send({
+      type: 'SET_STUDENT_INPUT_TOGGLE_VISIBLE',
+      targetStudentId,
+      payload: { visible }
+    });
+  }
+
+  /**
+   * Teacher helper: End the current lesson, save student grades, and exit students from drawing canvas
+   */
+  public sendEndLessonAndExit(targetStudentId: string = 'all') {
+    this.send({
+      type: 'END_LESSON_AND_EXIT',
+      targetStudentId
     });
   }
 

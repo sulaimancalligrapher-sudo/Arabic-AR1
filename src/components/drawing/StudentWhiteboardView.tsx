@@ -126,9 +126,11 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
   const [inputMethod, setInputMethod] = useState<'hand' | 'touch_mouse'>('hand');
   const inputMethodRef = useRef<'hand' | 'touch_mouse'>('hand');
   inputMethodRef.current = inputMethod;
+  const [showInputMethodToggle, setShowInputMethodToggle] = useState<boolean>(false);
 
   // Teacher remote session gate state
   const [teacherSessionStarted, setTeacherSessionStarted] = useState(false);
+  const [lessonEndedByTeacher, setLessonEndedByTeacher] = useState(false);
   const isPointerDownRef = useRef(false);
 
   // In-canvas button tracking
@@ -293,20 +295,32 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
         if (found) {
           setCurrentDrawing(found);
           clearCanvas();
+          setLessonEndedByTeacher(false);
           setTeacherSessionStarted(true);
           setFlowState('drawing');
-          startDrawingSession();
+          // Wait for student or teacher to press "ابدأ" - do not start drawing immediately!
+          setIsSessionActive(false);
+          isSessionActiveRef.current = false;
+          handTrackingService.resetLatch();
           if (found.arabicAudioText) {
-            audioService.speakArabic(`بدأت الحصة! المعلم اختار درس: ${found.title}`);
+            audioService.speakArabic(`المعلم حدد درس: ${found.title}. اضغط «ابدأ» للبدء ✍️`);
           }
         }
       } else if (msg.type === 'START_SESSION') {
         setTeacherSessionStarted(true);
         audioService.playChime();
         audioService.speakArabic('بدأ المعلم الجلسة! في انتظار اختيار الدرس 🚀');
-      } else if (msg.type === 'FINISH_SESSION') {
+      } else if (msg.type === 'FINISH_SESSION' || msg.type === 'END_LESSON_AND_EXIT') {
         setTeacherSessionStarted(false);
+        setIsSessionActive(false);
+        isSessionActiveRef.current = false;
         finishDrawingSession();
+        if (msg.type === 'END_LESSON_AND_EXIT') {
+          setLessonEndedByTeacher(true);
+          audioService.speakArabic('انتهى الدرس من قِبل المعلم! تم حفظ نتيجتك ودرجاتك بنجاح');
+        }
+        // Exit student from active drawing canvas and show completed score card in waiting flow
+        setFlowState('waiting');
       } else if (msg.type === 'CLEAR_BOARD') {
         clearCanvas();
       } else if (msg.type === 'SET_GUIDE_COLOR' && msg.payload?.color) {
@@ -316,6 +330,15 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       } else if (msg.type === 'SET_SENSITIVITY' && msg.payload?.sensitivity) {
         setSensitivity(msg.payload.sensitivity);
         handTrackingService.setSensitivity(msg.payload.sensitivity);
+      } else if (msg.type === 'SET_INPUT_METHOD' && msg.payload?.method) {
+        setInputMethod(msg.payload.method);
+        if (msg.payload.method === 'touch_mouse') {
+          audioService.speakArabic('السبورة البيضاء: يمكنك الآن الرسم باللمس أو بالفأرة');
+        } else {
+          audioService.speakArabic('وضع تتبع حركة اليد أمام الكاميرا');
+        }
+      } else if (msg.type === 'SET_STUDENT_INPUT_TOGGLE_VISIBLE') {
+        setShowInputMethodToggle(!!msg.payload?.visible);
       }
     });
 
@@ -436,10 +459,16 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       const ctx = userDrawCanvasRef.current.getContext('2d');
       ctx?.clearRect(0, 0, userDrawCanvasRef.current.width, userDrawCanvasRef.current.height);
     }
+    if (skeletonCanvasRef.current) {
+      const sCtx = skeletonCanvasRef.current.getContext('2d');
+      sCtx?.clearRect(0, 0, skeletonCanvasRef.current.width, skeletonCanvasRef.current.height);
+    }
     coveredSetRef.current.clear();
     onTargetSamplesRef.current = 0;
     totalSamplesRef.current = 0;
     lastDrawPosRef.current = null;
+    latestCoverageRef.current = 0;
+    latestAccuracyRef.current = 0;
     setCoverage(0);
     setAccuracy(0);
     setIsFinished(false);
@@ -661,6 +690,44 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     return { px, py };
   }, []);
 
+  // Compute exact viewport screen coordinates (pixels) from normalized camera coordinates [0, 1]
+  // Accounts for CSS object-contain letterboxing/pillarboxing so air-pointing matches on-screen elements
+  const getScreenCoordinatesFromNormalized = useCallback((normX: number, normY: number) => {
+    const canvas = skeletonCanvasRef.current || userDrawCanvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+
+    const canvasW = canvas.width;
+    const canvasH = canvas.height;
+    if (canvasW <= 0 || canvasH <= 0) return null;
+
+    const canvasAspect = canvasW / canvasH;
+    const rectAspect = rect.width / rect.height;
+
+    let actualW = rect.width;
+    let actualH = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (canvasAspect > rectAspect) {
+      actualW = rect.width;
+      actualH = rect.width / canvasAspect;
+      offsetX = 0;
+      offsetY = (rect.height - actualH) / 2;
+    } else {
+      actualH = rect.height;
+      actualW = rect.height * canvasAspect;
+      offsetX = (rect.width - actualW) / 2;
+      offsetY = 0;
+    }
+
+    const screenX = rect.left + offsetX + normX * actualW;
+    const screenY = rect.top + offsetY + normY * actualH;
+
+    return { screenX, screenY };
+  }, []);
+
   // Pointer events for Pure Whiteboard direct drawing mode (Stylus, Touch, Mouse)
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (inputMethodRef.current !== 'touch_mouse') return;
@@ -716,7 +783,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     }
 
     const currentMode = gestureModeRef.current;
-    const hasHand = !!data.indexTip;
+    const hasHand = !!data.indexTip && !!data.landmarks && data.landmarks.length >= 21;
 
     if (!hasHand) {
       if (isPenDownRef.current && !data.isLatched) {
@@ -733,38 +800,37 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       return;
     }
 
-    // 1. Virtual Start / Finish Button Hit-Test
+    // 1. Virtual Start / Finish Button Hit-Test & Air Gesture Trigger
     let isOverButton = false;
     if (actionButtonRef.current && data.indexTip) {
       const btn = actionButtonRef.current;
       const btnRect = btn.getBoundingClientRect();
-      const cvs = skeletonCanvasRef.current || userDrawCanvasRef.current;
-      if (cvs) {
-        const cvsRect = cvs.getBoundingClientRect();
-        const tipScreenX = cvsRect.left + data.indexTip.x * cvsRect.width;
-        const tipScreenY = cvsRect.top + data.indexTip.y * cvsRect.height;
+      const screenPos = getScreenCoordinatesFromNormalized(data.indexTip.x, data.indexTip.y);
 
+      if (screenPos) {
+        // Generous padding around the button (35px)
         isOverButton = (
-          tipScreenX >= btnRect.left - 15 &&
-          tipScreenX <= btnRect.right + 15 &&
-          tipScreenY >= btnRect.top - 15 &&
-          tipScreenY <= btnRect.bottom + 15
+          screenPos.screenX >= btnRect.left - 35 &&
+          screenPos.screenX <= btnRect.right + 35 &&
+          screenPos.screenY >= btnRect.top - 35 &&
+          screenPos.screenY <= btnRect.bottom + 35
         );
       }
       setIsHoveringButton(isOverButton);
-
-      // 2-Finger Pinch Click on Button (اقبض بإصبعين 🤏 للنقر):
-      // Allows clicking Start or Finish in the air with 2-finger pinch
-      if (isOverButton && data.isPinching) {
-        const now = Date.now();
-        if (now - lastButtonTriggerRef.current > 1000) {
-          lastButtonTriggerRef.current = now;
-          audioService.playPopSound();
-          handleToggleButton();
-        }
-      }
     } else {
       setIsHoveringButton(false);
+    }
+
+    // 2-Finger Pinch Click on Button (حركة إصبعين 🤏 للبدء والإنهاء في وضع اليد):
+    // When in Hand Tracking mode:
+    // If student pinches two fingers (thumb + index 🤏) either anywhere in the camera view OR pointing at the button:
+    if (inputMethodRef.current === 'hand' && data.isPinching) {
+      const now = Date.now();
+      if (now - lastButtonTriggerRef.current > 750) {
+        lastButtonTriggerRef.current = now;
+        audioService.playPopSound();
+        handleToggleButton();
+      }
     }
 
     // 2. Pure Smart Latch Drawing State
@@ -922,7 +988,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       }
     }
 
-    if (!isDrawing) {
+    if (!isDrawing || !isSessionActiveRef.current) {
       lastDrawPosRef.current = null;
       return;
     }
@@ -933,6 +999,16 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       if (activePoint) {
         const px = activePoint.x * userDrawCanvasRef.current.width;
         const py = activePoint.y * userDrawCanvasRef.current.height;
+
+        // Prevent drawing repeatedly on the exact same pixel if hand hasn't moved
+        if (lastDrawPosRef.current) {
+          const dx = px - lastDrawPosRef.current.x;
+          const dy = py - lastDrawPosRef.current.y;
+          if (dx * dx + dy * dy < 4) { // Ignore micro-jitters under 2px
+            return;
+          }
+        }
+
         processDrawPoint(px, py);
       }
     }
@@ -1092,42 +1168,44 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             </div>
           )}
 
-          {/* Toggle Input Method: Hand Tracking vs Whiteboard Touch/Mouse */}
-          <button
-            onClick={() => {
-              const nextMethod = inputMethod === 'hand' ? 'touch_mouse' : 'hand';
-              setInputMethod(nextMethod);
-              if (nextMethod === 'touch_mouse') {
-                audioService.speakArabic('السبورة البيضاء: يمكنك الآن الرسم باللمس أو بالفأرة');
-              } else {
-                audioService.speakArabic('وضع تتبع حركة اليد أمام الكاميرا');
+          {/* Toggle Input Method: Hand Tracking vs Whiteboard Touch/Mouse (Controlled by Teacher Settings) */}
+          {showInputMethodToggle && (
+            <button
+              onClick={() => {
+                const nextMethod = inputMethod === 'hand' ? 'touch_mouse' : 'hand';
+                setInputMethod(nextMethod);
+                if (nextMethod === 'touch_mouse') {
+                  audioService.speakArabic('السبورة البيضاء: يمكنك الآن الرسم باللمس أو بالفأرة');
+                } else {
+                  audioService.speakArabic('وضع تتبع حركة اليد أمام الكاميرا');
+                }
+              }}
+              className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer ${
+                inputMethod === 'touch_mouse'
+                  ? 'bg-amber-400 text-slate-950 border-amber-300 font-extrabold shadow-amber-500/25 ring-2 ring-amber-400/30'
+                  : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700'
+              }`}
+              title={
+                inputMethod === 'touch_mouse'
+                  ? 'التبديل إلى تتبع حركة اليد أمام الكاميرا ✋'
+                  : 'التبديل إلى السبورة البيضاء والرسم باللمس أو الماوس 🖌️'
               }
-            }}
-            className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer ${
-              inputMethod === 'touch_mouse'
-                ? 'bg-amber-400 text-slate-950 border-amber-300 font-extrabold shadow-amber-500/25 ring-2 ring-amber-400/30'
-                : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700'
-            }`}
-            title={
-              inputMethod === 'touch_mouse'
-                ? 'التبديل إلى تتبع حركة اليد أمام الكاميرا ✋'
-                : 'التبديل إلى السبورة البيضاء والرسم باللمس أو الماوس 🖌️'
-            }
-          >
-            {inputMethod === 'touch_mouse' ? (
-              <>
-                <Hand className="w-3.5 h-3.5 text-slate-950" />
-                <span className="hidden sm:inline">حركة اليد ✋</span>
-                <span className="sm:hidden">يد</span>
-              </>
-            ) : (
-              <>
-                <PenTool className="w-3.5 h-3.5 text-amber-400" />
-                <span className="hidden sm:inline">سبورة بيضاء (لمس / ماوس) 🖌️</span>
-                <span className="sm:hidden">لمس/ماوس</span>
-              </>
-            )}
-          </button>
+            >
+              {inputMethod === 'touch_mouse' ? (
+                <>
+                  <Hand className="w-3.5 h-3.5 text-slate-950" />
+                  <span className="hidden sm:inline">حركة اليد ✋</span>
+                  <span className="sm:hidden">يد</span>
+                </>
+              ) : (
+                <>
+                  <PenTool className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="hidden sm:inline">سبورة بيضاء (لمس / ماوس) 🖌️</span>
+                  <span className="sm:hidden">لمس/ماوس</span>
+                </>
+              )}
+            </button>
+          )}
 
           {/* Toggle Video Feed (only in hand mode) */}
           {inputMethod === 'hand' && (
@@ -1353,21 +1431,36 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
                   </div>
                 </div>
 
-                <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
-                  <p className="text-sm font-bold text-sky-300 flex items-center justify-center gap-2">
-                    <Radio className="w-4 h-4 animate-pulse text-sky-400" />
-                    <span>
+                {lessonEndedByTeacher ? (
+                  <div className="p-4 rounded-2xl bg-amber-950/80 border border-amber-500/50 space-y-2 text-center animate-fade-in shadow-xl">
+                    <div className="flex items-center justify-center gap-2 text-amber-300 font-extrabold text-sm">
+                      <CheckCircle2 className="w-5 h-5 text-amber-400" />
+                      <span>تم إنهاء الدرس وحفظ إجاباتك ودرجاتك بنجاح! 🏆</span>
+                    </div>
+                    <div className="text-xs text-slate-200">
+                      درجتك المحفوظة: <strong className="text-amber-400 font-mono text-sm">{latestAccuracyRef.current || accuracy || 80}% إتقان</strong> ({Math.round((currentDrawing.points * (latestAccuracyRef.current || accuracy || 80)) / 100)} نقطة).
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      تم إخراجك من لوحة الرسم وتسجيل النتيجة في Google Sheets للمعلم. في انتظار أن يحدد المعلم درساً جديداً...
+                    </p>
+                  </div>
+                ) : (
+                  <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
+                    <p className="text-sm font-bold text-sky-300 flex items-center justify-center gap-2">
+                      <Radio className="w-4 h-4 animate-pulse text-sky-400" />
+                      <span>
+                        {teacherSessionStarted
+                          ? '🟢 بدأ المعلم الجلسة بنجاح! في انتظار تحديد الدرس...'
+                          : 'في انتظار المعلم لبدء الجلسة... ⏳'}
+                      </span>
+                    </p>
+                    <p className="text-xs text-slate-400 leading-relaxed">
                       {teacherSessionStarted
-                        ? '🟢 بدأ المعلم الجلسة بنجاح! في انتظار تحديد الدرس...'
-                        : 'في انتظار المعلم لبدء الجلسة... ⏳'}
-                    </span>
-                  </p>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    {teacherSessionStarted
-                      ? 'الجلسة نشطة الآن! ثوانٍ معدودة وسيحدد المعلم الدرس لتظهر أمامك اللوحة فوراً وتبدأ بالرسم 🎨'
-                      : 'بمجرد أن يبدأ المعلم الجلسة ويحدد الرسمة من لوحة التحكم، ستظهر أمامك على الفور وتبدأ في الرسم والتلوين 🎨'}
-                  </p>
-                </div>
+                        ? 'الجلسة نشطة الآن! ثوانٍ معدودة وسيحدد المعلم الدرس لتظهر أمامك اللوحة فوراً وتبدأ بالرسم 🎨'
+                        : 'بمجرد أن يبدأ المعلم الجلسة ويحدد الرسمة من لوحة التحكم، ستظهر أمامك على الفور وتبدأ في الرسم والتلوين 🎨'}
+                    </p>
+                  </div>
+                )}
 
                 <div className="flex items-center justify-center gap-2 text-[11px] text-emerald-400 font-bold bg-slate-950/60 py-2.5 rounded-xl border border-slate-800/80">
                   {teacherSessionStarted ? (

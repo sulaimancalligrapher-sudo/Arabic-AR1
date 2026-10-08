@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { DrawingItem, DrawingMode, DrawingTolerance } from '../../types';
 import { drawingEngineService, GUIDE_LINE_COLORS } from '../../services/drawingEngineService';
+import { whiteboardSyncService } from '../../services/whiteboardSyncService';
 import {
   X,
   Upload,
@@ -15,7 +16,11 @@ import {
   Info,
   ChevronDown,
   ChevronUp,
-  AlertCircle
+  AlertCircle,
+  Hand,
+  PenTool,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 
 interface DrawingAdminModalProps {
@@ -31,9 +36,23 @@ export const DrawingAdminModal: React.FC<DrawingAdminModalProps> = ({
   onDrawingsUpdated,
   initialEditingDrawingId
 }) => {
-  const [activeTab, setActiveTab] = useState<'upload' | 'manage'>('upload');
+  const [activeTab, setActiveTab] = useState<'upload' | 'manage' | 'student_controls'>('upload');
   const [editingDrawingId, setEditingDrawingId] = useState<string | null>(null);
   const [showGuidelines, setShowGuidelines] = useState(true);
+
+  // Student Whiteboard Controls State (Request 3)
+  const [showStudentInputToggle, setShowStudentInputToggle] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('baseera_student_input_toggle_visible') === 'true';
+    }
+    return false;
+  });
+  const [studentInputMethod, setStudentInputMethod] = useState<'hand' | 'touch_mouse'>(() => {
+    if (typeof window !== 'undefined') {
+      return (localStorage.getItem('baseera_student_input_method') as any) || 'hand';
+    }
+    return 'hand';
+  });
   
   // Form fields for new or editing drawing
   const [title, setTitle] = useState('');
@@ -259,6 +278,20 @@ export const DrawingAdminModal: React.FC<DrawingAdminModalProps> = ({
           >
             <Sliders className="w-3.5 h-3.5" />
             <span>إدارة وتعديل الرسومات المرفوعة ({customList.length})</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab('student_controls');
+            }}
+            className={`pb-2.5 text-xs font-bold border-b-2 flex items-center gap-1.5 transition-colors cursor-pointer ${
+              activeTab === 'student_controls'
+                ? 'border-amber-400 text-amber-400'
+                : 'border-transparent text-slate-400 hover:text-white'
+            }`}
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>تحكم سبورة الطالب وإظهار الزر 👁️</span>
           </button>
         </div>
 
@@ -589,6 +622,112 @@ export const DrawingAdminModal: React.FC<DrawingAdminModalProps> = ({
                   </div>
                 ))
               )}
+            </div>
+          )}
+
+          {/* Tab 3: Student Controls & Visibility (Request 3) */}
+          {activeTab === 'student_controls' && (
+            <div className="space-y-5 text-xs">
+              <div className="p-4 rounded-2xl bg-amber-950/30 border border-amber-500/40 space-y-2">
+                <h4 className="text-sm font-bold text-amber-400 flex items-center gap-2">
+                  <Eye className="w-4 h-4" />
+                  <span>التحكم في زر طريقة الرسم عند الطلاب (حركة اليد / لمس أو فأرة)</span>
+                </h4>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  بشكل افتراضي، يكون زر التبديل <strong>مخفياً</strong> من شاشة الطالب لمنع تشتيت انتباهه. يمكنك النقر على أيقونة <strong>«العين»</strong> لإظهار الزر للطالب في شاشته، أو إخفائه في أي وقت.
+                </p>
+              </div>
+
+              {/* Eye Toggle & Current Visibility */}
+              <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div>
+                    <div className="text-xs font-bold text-white mb-0.5">
+                      حالة ظهور الزر في شاشة الطالب:
+                    </div>
+                    <div className="text-[11px] text-slate-400">
+                      {showStudentInputToggle
+                        ? '🟢 الزر ظاهر حالياً في شاشة الطالب ويمكنه التبديل بنفسه.'
+                        : '🔒 الزر مخفي حالياً من شاشة الطالب (الوضع الافتراضي المستحسن).'}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      const next = !showStudentInputToggle;
+                      setShowStudentInputToggle(next);
+                      if (typeof window !== 'undefined') {
+                        localStorage.setItem('baseera_student_input_toggle_visible', String(next));
+                      }
+                      whiteboardSyncService.sendStudentInputToggleVisibility(next, 'all');
+                    }}
+                    className={`px-4 py-2.5 rounded-xl border text-xs font-bold flex items-center gap-2 transition-all cursor-pointer shadow-md ${
+                      showStudentInputToggle
+                        ? 'bg-amber-500 text-slate-950 border-amber-400 font-extrabold shadow-amber-500/20'
+                        : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700'
+                    }`}
+                  >
+                    {showStudentInputToggle ? (
+                      <>
+                        <Eye className="w-4 h-4" />
+                        <span>ظاهر في صفحة الطالب (انقر للإخفاء) 👁️</span>
+                      </>
+                    ) : (
+                      <>
+                        <EyeOff className="w-4 h-4 text-slate-400" />
+                        <span>مخفي من صفحة الطالب (انقر للإظهار) 👁️‍🗨️</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Input Mode Force Selection */}
+              <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+                <div className="text-xs font-bold text-white mb-1">
+                  تحديد طريقة الرسم الإلزامية لجميع الطلاب:
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    onClick={() => {
+                      setStudentInputMethod('hand');
+                      if (typeof window !== 'undefined') {
+                        localStorage.setItem('baseera_student_input_method', 'hand');
+                      }
+                      whiteboardSyncService.sendInputMethod('hand', 'all');
+                    }}
+                    className={`p-3.5 rounded-2xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                      studentInputMethod === 'hand'
+                        ? 'bg-sky-600 text-white border-sky-400 shadow-lg ring-2 ring-sky-400/30 font-black'
+                        : 'bg-slate-950 text-slate-300 border-slate-800 hover:bg-slate-800'
+                    }`}
+                  >
+                    <Hand className="w-4 h-4" />
+                    <span>تتبع حركة اليد أمام الكاميرا ✋</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setStudentInputMethod('touch_mouse');
+                      if (typeof window !== 'undefined') {
+                        localStorage.setItem('baseera_student_input_method', 'touch_mouse');
+                      }
+                      whiteboardSyncService.sendInputMethod('touch_mouse', 'all');
+                    }}
+                    className={`p-3.5 rounded-2xl border text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                      studentInputMethod === 'touch_mouse'
+                        ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-lg ring-2 ring-amber-400/30 font-black'
+                        : 'bg-slate-950 text-slate-300 border-slate-800 hover:bg-slate-800'
+                    }`}
+                  >
+                    <PenTool className="w-4 h-4" />
+                    <span>السبورة البيضاء (لمس / ماوس) 🖌️</span>
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  عند تحديد أي من الوضعين، يتم تحويل جميع شاشات الطلاب فوراً إلى الوضع المختار.
+                </p>
+              </div>
             </div>
           )}
         </div>

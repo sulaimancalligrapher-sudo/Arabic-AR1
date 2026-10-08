@@ -304,6 +304,14 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
     // Only draw if session is explicitly active and not finished
     if (!isDrawingSessionActiveRef.current || isFinishedRef.current || !analysisRef.current || !userDrawCanvasRef.current) return;
 
+    if (lastDrawPosRef.current) {
+      const dx = pixelX - lastDrawPosRef.current.x;
+      const dy = pixelY - lastDrawPosRef.current.y;
+      if (dx * dx + dy * dy < 4) {
+        return; // Ignore micro-jitter under 2px
+      }
+    }
+
     const { width, height, targetMask, totalTargetPixels } = analysisRef.current;
     const ctx = userDrawCanvasRef.current.getContext('2d');
     if (!ctx) return;
@@ -376,7 +384,7 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
     if (!containerRef.current || !analysisRef.current) return;
 
     const currentMode = gestureModeRef.current;
-    const hasHand = !!data.indexTip;
+    const hasHand = !!data.indexTip && !!data.landmarks && data.landmarks.length >= 21;
     setHandDetected(hasHand);
 
     if (!hasHand) {
@@ -406,28 +414,28 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
         const tipScreenX = cvsRect.left + data.indexTip.x * cvsRect.width;
         const tipScreenY = cvsRect.top + data.indexTip.y * cvsRect.height;
 
-        // Generous touch margin of 16px around the button
+        // Generous touch margin of 35px around the button
         isOverActionButton = (
-          tipScreenX >= btnRect.left - 16 &&
-          tipScreenX <= btnRect.right + 16 &&
-          tipScreenY >= btnRect.top - 16 &&
-          tipScreenY <= btnRect.bottom + 16
+          tipScreenX >= btnRect.left - 35 &&
+          tipScreenX <= btnRect.right + 35 &&
+          tipScreenY >= btnRect.top - 35 &&
+          tipScreenY <= btnRect.bottom + 35
         );
-
-        setIsHoveringButton(isOverActionButton);
-
-        // Click detection: 2-Finger Pinch (data.isPinching: Thumb + Index 🤏)
-        if (isOverActionButton && data.isPinching) {
-          const now = Date.now();
-          if (now - lastButtonTriggerRef.current > 750) {
-            lastButtonTriggerRef.current = now;
-            audioService.playPopSound();
-            handleToggleButtonSessionRef.current();
-          }
-        }
       }
+      setIsHoveringButton(isOverActionButton);
     } else {
       setIsHoveringButton(false);
+    }
+
+    // Click detection: 2-Finger Pinch (data.isPinching: Thumb + Index 🤏)
+    // Works either by pointing at the button OR pinching anywhere in the air!
+    if (data.isPinching) {
+      const now = Date.now();
+      if (now - lastButtonTriggerRef.current > 750) {
+        lastButtonTriggerRef.current = now;
+        audioService.playPopSound();
+        handleToggleButtonSessionRef.current();
+      }
     }
 
     // 2. Determine if drawing is currently active:

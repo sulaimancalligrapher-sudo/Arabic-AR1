@@ -86,9 +86,9 @@ class HandTrackingService {
   private currentPinchState: boolean = false;
 
   // 3-Finger Pen Grip Thresholds (Thumb + Index + Middle)
-  private threeFingerOnThreshold: number = 0.080;
-  private threeFingerOffThreshold: number = 0.098;
-  private threeFingerOnRatio: number = 0.54;
+  private threeFingerOnThreshold: number = 0.058;
+  private threeFingerOffThreshold: number = 0.095;
+  private threeFingerOnRatio: number = 0.40;
   private threeFingerOffRatio: number = 0.65;
   private currentThreeFingerState: boolean = false;
 
@@ -157,6 +157,13 @@ class HandTrackingService {
     this.isLatched = false;
     this.currentThreeFingerState = false;
     this.currentPinchState = false;
+    this.lastHandSeenTime = 0;
+    this.latestData.isLatched = false;
+    this.latestData.isThreeFingerLatched = false;
+    this.latestData.landmarks = null;
+    this.latestData.indexTip = null;
+    this.latestData.activeDrawPoint = null;
+    this.latestData.gesture = 'no_hand';
   }
 
   /**
@@ -167,24 +174,24 @@ class HandTrackingService {
     if (level === 'easy') {
       this.pinchOnThreshold = 0.115;
       this.pinchOffThreshold = 0.16;
-      this.threeFingerOnThreshold = 0.085;
-      this.threeFingerOffThreshold = 0.15;
-      this.threeFingerOnRatio = 0.56;
-      this.threeFingerOffRatio = 0.85;
+      this.threeFingerOnThreshold = 0.068;
+      this.threeFingerOffThreshold = 0.105;
+      this.threeFingerOnRatio = 0.46;
+      this.threeFingerOffRatio = 0.70;
     } else if (level === 'normal') {
       this.pinchOnThreshold = 0.095;
       this.pinchOffThreshold = 0.135;
-      this.threeFingerOnThreshold = 0.075;
-      this.threeFingerOffThreshold = 0.135;
-      this.threeFingerOnRatio = 0.48;
-      this.threeFingerOffRatio = 0.78;
+      this.threeFingerOnThreshold = 0.058;
+      this.threeFingerOffThreshold = 0.095;
+      this.threeFingerOnRatio = 0.40;
+      this.threeFingerOffRatio = 0.65;
     } else {
       this.pinchOnThreshold = 0.075;
       this.pinchOffThreshold = 0.11;
-      this.threeFingerOnThreshold = 0.065;
-      this.threeFingerOffThreshold = 0.12;
-      this.threeFingerOnRatio = 0.42;
-      this.threeFingerOffRatio = 0.70;
+      this.threeFingerOnThreshold = 0.048;
+      this.threeFingerOffThreshold = 0.085;
+      this.threeFingerOnRatio = 0.35;
+      this.threeFingerOffRatio = 0.58;
     }
   }
 
@@ -294,8 +301,8 @@ class HandTrackingService {
         this.hands.setOptions({
           maxNumHands: 1,
           modelComplexity: this.isMobileOrTablet ? 0 : 1,
-          minDetectionConfidence: 0.45,
-          minTrackingConfidence: 0.45
+          minDetectionConfidence: 0.72,
+          minTrackingConfidence: 0.65
         });
 
         this.hands.onResults((results: any) => this.processResults(results));
@@ -447,7 +454,15 @@ class HandTrackingService {
   private processResults(results: any) {
     if (!this.isRunning) return;
 
-    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+    // Validate presence and confidence: Discard phantom background detections
+    const handedness = results.multiHandedness?.[0];
+    const handScore = handedness?.score ?? (results.multiHandLandmarks?.length > 0 ? 0.85 : 0);
+
+    if (
+      results.multiHandLandmarks &&
+      results.multiHandLandmarks.length > 0 &&
+      handScore >= 0.70
+    ) {
       const landmarks = results.multiHandLandmarks[0];
 
       // Landmark 8: Index Finger Tip
@@ -466,6 +481,21 @@ class HandTrackingService {
       const rawWrist = landmarks[0];
       const rawIndexKnuckle = landmarks[5];
       const rawPinkyKnuckle = landmarks[17];
+
+      // Aspect ratio correction for true isotropic euclidean distance
+      const aspect = this.videoDimensions.aspect || 1;
+
+      // Palm width (scale invariant reference with aspect correction)
+      const palmDx = ((1 - rawPinkyKnuckle.x) - (1 - rawIndexKnuckle.x)) * aspect;
+      const palmDy = rawPinkyKnuckle.y - rawIndexKnuckle.y;
+      const palmWidth = Math.sqrt(palmDx * palmDx + palmDy * palmDy);
+
+      // Anatomical validity check: Real human hand in camera range must have sensible palm scale
+      // Reject noise/shadow artifacts where palm scale is deformed or microscopic
+      if (palmWidth < 0.055 || palmWidth > 0.65) {
+        this.clearToNoHand();
+        return;
+      }
 
       // Video is mirrored for natural interaction: x is flipped: 1 - x
       const targetX = 1 - rawIndex.x;
@@ -487,33 +517,18 @@ class HandTrackingService {
       const wristY = rawWrist.y;
 
       // Cursor smoothing formula:
-      // Solution 1: Snappy 0.72 factor for mobile & tablet (cursor immediately sticks to finger without dragging/lagging behind!)
-      // Desktop: 0.40 factor for buttery smooth lines
       const smoothing = this.isMobileOrTablet ? 0.72 : 0.40;
       this.smoothedX += (targetX - this.smoothedX) * smoothing;
       this.smoothedY += (targetY - this.smoothedY) * smoothing;
 
-      // Aspect ratio correction for true isotropic euclidean distance (prevents distortion on mobile portrait)
-      const aspect = this.videoDimensions.aspect || 1;
-      const dist2D = (p1: { x: number; y: number }, p2: { x: number; y: number }) => {
-        const dx = (p1.x - p2.x) * aspect;
-        const dy = p1.y - p2.y;
-        return Math.sqrt(dx * dx + dy * dy);
-      };
-
-      // Palm width (scale invariant reference with aspect correction)
-      const palmDx = ((1 - rawPinkyKnuckle.x) - (1 - rawIndexKnuckle.x)) * aspect;
-      const palmDy = rawPinkyKnuckle.y - rawIndexKnuckle.y;
-      const palmWidth = Math.max(0.04, Math.sqrt(palmDx * palmDx + palmDy * palmDy));
-
-      // 1. Two-Finger Pinch (Thumb Tip to Index Tip) - Used for grabbing/moving
+      // 1. Two-Finger Pinch (Thumb Tip to Index Tip) - Used for clicking buttons in the air 🤏
       const dxThumbIndex = (thumbX - targetX) * aspect;
       const dyThumbIndex = thumbY - targetY;
       const rawDistance = Math.sqrt(dxThumbIndex * dxThumbIndex + dyThumbIndex * dyThumbIndex);
       const pinchRatio = rawDistance / palmWidth;
 
-      const isCurrentlyClose2 = rawDistance < this.pinchOnThreshold || pinchRatio < 0.68;
-      const isCurrentlyFar2 = rawDistance > this.pinchOffThreshold && pinchRatio > 0.95;
+      const isCurrentlyClose2 = rawDistance < 0.12 || pinchRatio < 0.72;
+      const isCurrentlyFar2 = rawDistance > 0.16 && pinchRatio > 0.95;
 
       if (this.currentPinchState) {
         if (isCurrentlyFar2) {
@@ -545,11 +560,11 @@ class HandTrackingService {
       this.smoothedCentroidX += (rawCentroidX - this.smoothedCentroidX) * centroidSmoothing;
       this.smoothedCentroidY += (rawCentroidY - this.smoothedCentroidY) * centroidSmoothing;
 
-      // When the 3 fingers join together (START condition):
-      const isCurrentlyClose3 = threeFingerSpread < this.threeFingerOnThreshold || threeFingerRatio < this.threeFingerOnRatio;
+      // When the 3 fingers join together tightly in a pen grip (START condition ✍️):
+      const isCurrentlyClose3 = threeFingerSpread < this.threeFingerOnThreshold && threeFingerRatio < this.threeFingerOnRatio;
 
-      // When the 3 fingers spread apart (STOP condition):
-      const isCurrentlyFar3 = threeFingerSpread > this.threeFingerOffThreshold && threeFingerRatio > this.threeFingerOffRatio;
+      // When the 3 fingers spread apart explicitly (STOP condition ✋):
+      const isCurrentlyFar3 = threeFingerSpread > this.threeFingerOffThreshold || threeFingerRatio > this.threeFingerOffRatio;
 
       if (this.currentThreeFingerState) {
         if (isCurrentlyFar3) {
@@ -564,9 +579,6 @@ class HandTrackingService {
       this.lastHandSeenTime = Date.now();
 
       // Pure Smart Latch State Machine (حالة القفل والتثبيت الكاملة):
-      // 1. شرط البدء: بمجرد ضم الأصابع الـ 3 -> يُقفل وضع الرسم (isLatched = true)
-      // 2. أثناء الرسم: يستمر الرسم دون انقطاع، حتى لو التفت اليد أو اختفى إصبع بالحجب
-      // 3. شرط التوقف الوحيد: أن يفرد الطالب أصابعه الثلاثة صراحة (isCurrentlyFar3) أو خروج اليد من الكاميرا
       if (this.drawingGestureMode === 'three_finger_latch') {
         if (!this.isLatched) {
           if (isCurrentlyClose3) {
@@ -595,7 +607,7 @@ class HandTrackingService {
         this.isLatched = true;
       }
 
-      // Active Draw Point: Always resilient index tip (never drops even if other fingers occluded)
+      // Active Draw Point: Resilient index tip
       const activeDrawPoint = { x: this.smoothedX, y: this.smoothedY };
 
       // 3. Gesture Classification
@@ -641,41 +653,48 @@ class HandTrackingService {
         videoDimensions: this.videoDimensions
       };
     } else {
-      // Hand temporarily out of frame: check 1s grace period before clearing latch
-      const now = Date.now();
-      if (now - this.lastHandSeenTime > this.HAND_LOST_GRACE_MS) {
-        this.isLatched = false;
-        this.currentPinchState = false;
-        this.currentThreeFingerState = false;
-      }
-      this.latestData = {
-        indexTip: null,
-        thumbTip: null,
-        middleTip: null,
-        ringTip: null,
-        pinkyTip: null,
-        wrist: null,
-        isPinching: false,
-        pinchDistance: 1.0,
-        pinchRatio: 1.0,
-        isThreeFingerPinching: false,
-        threeFingerSpread: 1.0,
-        threeFingerRatio: 1.0,
-        threeFingerCentroid: null,
-        isLatched: this.isLatched,
-        isThreeFingerLatched: this.isLatched,
-        activeDrawPoint: null,
-        gesture: 'no_hand',
-        isFist: false,
-        landmarks: null,
-        lastUpdated: Date.now(),
-        fps: this.currentFps,
-        estimatedLightLevel: this.lightLevel,
-        isMobileOptimized: this.isMobileOrTablet,
-        videoDimensions: this.videoDimensions
-      };
+      this.clearToNoHand();
+      return;
     }
 
+    if (this.callback) {
+      this.callback(this.latestData);
+    }
+  }
+
+  /**
+   * Helper to reset to no hand state immediately
+   */
+  private clearToNoHand() {
+    this.isLatched = false;
+    this.currentPinchState = false;
+    this.currentThreeFingerState = false;
+    this.latestData = {
+      indexTip: null,
+      thumbTip: null,
+      middleTip: null,
+      ringTip: null,
+      pinkyTip: null,
+      wrist: null,
+      isPinching: false,
+      pinchDistance: 1.0,
+      pinchRatio: 1.0,
+      isThreeFingerPinching: false,
+      threeFingerSpread: 1.0,
+      threeFingerRatio: 1.0,
+      threeFingerCentroid: null,
+      isLatched: false,
+      isThreeFingerLatched: false,
+      activeDrawPoint: null,
+      gesture: 'no_hand',
+      isFist: false,
+      landmarks: null,
+      lastUpdated: Date.now(),
+      fps: this.currentFps,
+      estimatedLightLevel: this.lightLevel,
+      isMobileOptimized: this.isMobileOrTablet,
+      videoDimensions: this.videoDimensions
+    };
     if (this.callback) {
       this.callback(this.latestData);
     }
