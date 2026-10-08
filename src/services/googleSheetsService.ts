@@ -397,6 +397,31 @@ class GoogleSheetsService {
   }
 
   /**
+   * Check if Google Sheets URL is configured
+   */
+  public isConfigured(): boolean {
+    return !!this.getConfig().scriptUrl;
+  }
+
+  /**
+   * Clear all local drawing history
+   */
+  public clearDrawingHistory(): void {
+    try {
+      localStorage.setItem(STORAGE_KEYS.DRAWING_HISTORY, JSON.stringify([]));
+    } catch {
+      // Ignore
+    }
+  }
+
+  /**
+   * Synchronize pending offline queue
+   */
+  public async syncOfflineQueue(): Promise<{ success: boolean; syncedCount: number; message: string }> {
+    return this.syncQueue();
+  }
+
+  /**
    * Synchronize pending queue to Google Sheets
    */
   public async syncQueue(): Promise<{ success: boolean; syncedCount: number; message: string }> {

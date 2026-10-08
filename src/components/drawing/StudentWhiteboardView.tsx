@@ -27,7 +27,8 @@ import {
   ArrowRight,
   ShieldCheck,
   Hash,
-  PenTool
+  PenTool,
+  LogOut
 } from 'lucide-react';
 
 interface StudentWhiteboardViewProps {
@@ -141,6 +142,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
   const lastButtonTriggerRef = useRef(0);
   const lastGesturePinchTimeRef = useRef(0);
   const dwellStartTimeRef = useRef<number | null>(null);
+  const airPinchStartTimeRef = useRef<number | null>(null);
+  const threeFingerJoinStartTimeRef = useRef<number | null>(null);
+  const pinchMustReleaseRef = useRef<boolean>(false);
 
   // Canvases and container refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -536,10 +540,13 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
 
   const handleToggleButton = useCallback((force = false) => {
     const now = Date.now();
-    if (!force && now - lastButtonTriggerRef.current < 400) {
+    if (!force && now - lastButtonTriggerRef.current < 2000) {
       return;
     }
     lastButtonTriggerRef.current = now;
+    dwellStartTimeRef.current = null;
+    airPinchStartTimeRef.current = null;
+    setDwellProgress(0);
 
     if (!isSessionActiveRef.current) {
       startDrawingSession();
@@ -825,15 +832,24 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       setIsHoveringButton(false);
     }
 
-    // Dwell detection when pointing at the button (1.2 seconds hold activates button effortlessly)
+    // Reset pinch release guard when student opens fingers
+    if (!data.isPinching) {
+      pinchMustReleaseRef.current = false;
+    }
+
+    const now = Date.now();
+    const canTriggerButton = (now - lastButtonTriggerRef.current > 2000) && !pinchMustReleaseRef.current;
+
+    // Interaction A: Over Action Button (Hovering or Pinching on Button for 1.0 second)
+    // As requested: "في السبابة و الابهام ملتصقتين تماما في ثانية مثلا على زر ابدا/ انهاء يعني كانه ينقر على الزر"
     if (isOverButton) {
       if (!dwellStartTimeRef.current) {
-        dwellStartTimeRef.current = Date.now();
+        dwellStartTimeRef.current = now;
       } else {
-        const elapsed = Date.now() - dwellStartTimeRef.current;
-        const progress = Math.min(100, Math.round((elapsed / 1200) * 100));
+        const elapsed = now - dwellStartTimeRef.current;
+        const progress = Math.min(100, Math.round((elapsed / 1000) * 100)); // Exactly 1.0s (1000ms)
         setDwellProgress(progress);
-        if (elapsed >= 1200) {
+        if (elapsed >= 1000 && canTriggerButton) {
           dwellStartTimeRef.current = null;
           setDwellProgress(0);
           setButtonFeedback(true);
@@ -844,38 +860,86 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       }
     } else {
       dwellStartTimeRef.current = null;
-      setDwellProgress(0);
     }
 
-    // 2-Finger Pinch Click on Button (حركة إصبعين 🤏 للبدء والإنهاء في وضع اليد):
-    // When in Hand Tracking mode:
-    // If student pinches two fingers (thumb + index 🤏) either anywhere in the camera view OR pointing at the button:
-    if (inputMethodRef.current === 'hand' && data.isPinching) {
-      const now = Date.now();
-      if (now - lastGesturePinchTimeRef.current > 800) {
-        lastGesturePinchTimeRef.current = now;
-        dwellStartTimeRef.current = null;
-        setDwellProgress(0);
-        setButtonFeedback(true);
-        setTimeout(() => setButtonFeedback(false), 500);
-        audioService.playPopSound();
-        handleToggleButton(true); // Force execute without cooldown blockage!
+    // Interaction B: Air Pinch Gesture (Only when NOT over button)
+    // When session is NOT active: 2-finger pinch held for 1.0s starts session
+    // When session IS active: Air-pinch is disabled to completely prevent conflict with drawing!
+    if (!isOverButton) {
+      if (!isSessionActiveRef.current) {
+        if (data.isTwoFingerOnlyPinch && canTriggerButton) {
+          if (!airPinchStartTimeRef.current) {
+            airPinchStartTimeRef.current = now;
+          } else {
+            const elapsed = now - airPinchStartTimeRef.current;
+            const progress = Math.min(100, Math.round((elapsed / 1000) * 100)); // Exactly 1.0s (1000ms)
+            setDwellProgress(progress);
+            if (elapsed >= 1000) {
+              airPinchStartTimeRef.current = null;
+              setDwellProgress(0);
+              setButtonFeedback(true);
+              setTimeout(() => setButtonFeedback(false), 500);
+              audioService.playPopSound();
+              handleToggleButton(true);
+            }
+          }
+        } else {
+          airPinchStartTimeRef.current = null;
+          if (!isOverButton) {
+            setDwellProgress(0);
+          }
+        }
+      } else {
+        airPinchStartTimeRef.current = null;
       }
     }
 
-    // 2. Pure Smart Latch Drawing State
-    // Draws continuously while isLatched is true, unless hovering directly over the action button
-    let isDrawing = false;
+    // 2. Determine if drawing is currently active:
+    // Session MUST be active, and hand NOT over the button!
+    // As requested:
+    // "و في الرسم ثلاث اصابع الابهام و السبابة و الموسطى اذا اجتمع ثلاث اصابع في ثانية واحدة يبدا الرسم و لا يينتهي حتى اذا اختفى اصبع اما الكاميرا لا يتوقف الرسم .. اذا تباعد الاصبع بوضوح يتوقف الرسم"
+    let isDrawing = isPenDownRef.current;
     if (isSessionActiveRef.current && !isOverButton) {
-      if (currentMode === 'three_finger_latch' || currentMode === 'two_finger_latch') {
-        isDrawing = !!data.isLatched;
-      } else if (currentMode === 'three_finger_pinch') {
-        isDrawing = !!data.isThreeFingerPinching;
-      } else if (currentMode === 'two_finger_pinch') {
-        isDrawing = !!data.isPinching;
-      } else if (currentMode === 'continuous') {
-        isDrawing = true;
+      if (!isPenDownRef.current) {
+        // Condition to START drawing: 3 fingers meet in pen grip
+        const isThreeFingersTogether = (
+          data.isThreeFingerPinching ||
+          data.isLatched ||
+          (data.threeFingerSpread < 0.085 && data.threeFingerRatio < 0.45)
+        );
+
+        if (isThreeFingersTogether) {
+          if (!threeFingerJoinStartTimeRef.current) {
+            threeFingerJoinStartTimeRef.current = now;
+          } else {
+            const elapsed = now - threeFingerJoinStartTimeRef.current;
+            if (elapsed >= 350) { // Gathered and stabilized
+              isDrawing = true;
+              threeFingerJoinStartTimeRef.current = null;
+            }
+          }
+        } else {
+          threeFingerJoinStartTimeRef.current = null;
+        }
+      } else {
+        // While DRAWING:
+        // Drawing remains locked ON! Even if one finger momentarily flickers or drops, drawing continues!
+        // ONLY stops when fingers are CLEARLY and WIDELY spread apart:
+        const isFingersClearlySeparated = (
+          data.threeFingerSpread > 0.12 &&
+          data.pinchDistance > 0.14
+        ) || data.gesture === 'open_hand';
+
+        if (isFingersClearlySeparated) {
+          isDrawing = false;
+          threeFingerJoinStartTimeRef.current = null;
+        } else {
+          isDrawing = true; // Maintain stroke continuity
+        }
       }
+    } else {
+      isDrawing = false;
+      threeFingerJoinStartTimeRef.current = null;
     }
 
     if (isPenDownRef.current !== isDrawing) {
@@ -883,6 +947,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       setIsPenDown(isDrawing);
       if (isDrawing) {
         audioService.playTickSound();
+        lastDrawPosRef.current = null;
+      } else {
+        lastDrawPosRef.current = null;
       }
     }
 
@@ -1198,44 +1265,45 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
             </div>
           )}
 
-          {/* Toggle Input Method: Hand Tracking vs Whiteboard Touch/Mouse (Controlled by Teacher Settings) */}
-          {showInputMethodToggle && (
+          {/* Toggle Input Method: 1. Hand Tracking vs 2. Whiteboard Touch/Mouse */}
+          <div className="flex items-center bg-slate-950 p-1 rounded-2xl border border-slate-700/80 shadow-inner">
             <button
               onClick={() => {
-                const nextMethod = inputMethod === 'hand' ? 'touch_mouse' : 'hand';
-                setInputMethod(nextMethod);
-                if (nextMethod === 'touch_mouse') {
-                  audioService.speakArabic('السبورة البيضاء: يمكنك الآن الرسم باللمس أو بالفأرة');
-                } else {
+                if (inputMethod !== 'hand') {
+                  setInputMethod('hand');
                   audioService.speakArabic('وضع تتبع حركة اليد أمام الكاميرا');
                 }
               }}
-              className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer ${
-                inputMethod === 'touch_mouse'
-                  ? 'bg-amber-400 text-slate-950 border-amber-300 font-extrabold shadow-amber-500/25 ring-2 ring-amber-400/30'
-                  : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700'
+              className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                inputMethod === 'hand'
+                  ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold ring-2 ring-amber-400/30'
+                  : 'text-slate-400 hover:text-white'
               }`}
-              title={
-                inputMethod === 'touch_mouse'
-                  ? 'التبديل إلى تتبع حركة اليد أمام الكاميرا ✋'
-                  : 'التبديل إلى السبورة البيضاء والرسم باللمس أو الماوس 🖌️'
-              }
+              title="النوع الأول: تتبع حركة اليد أمام الكاميرا ✋"
             >
-              {inputMethod === 'touch_mouse' ? (
-                <>
-                  <Hand className="w-3.5 h-3.5 text-slate-950" />
-                  <span className="hidden sm:inline">حركة اليد ✋</span>
-                  <span className="sm:hidden">يد</span>
-                </>
-              ) : (
-                <>
-                  <PenTool className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="hidden sm:inline">سبورة بيضاء (لمس / ماوس) 🖌️</span>
-                  <span className="sm:hidden">لمس/ماوس</span>
-                </>
-              )}
+              <Hand className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">تتبع اليد ✋</span>
+              <span className="sm:hidden">يد</span>
             </button>
-          )}
+            <button
+              onClick={() => {
+                if (inputMethod !== 'touch_mouse') {
+                  setInputMethod('touch_mouse');
+                  audioService.speakArabic('السبورة البيضاء: يمكنك الآن الرسم باللمس أو بالفأرة');
+                }
+              }}
+              className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                inputMethod === 'touch_mouse'
+                  ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold ring-2 ring-amber-400/30'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+              title="النوع الثاني: السبورة البيضاء (لمس / ماوس) 🖌️"
+            >
+              <PenTool className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">فأرة / لمس 🖱️</span>
+              <span className="sm:hidden">لمس</span>
+            </button>
+          </div>
 
           {/* Toggle Video Feed (only in hand mode) */}
           {inputMethod === 'hand' && (
@@ -1478,27 +1546,39 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
                 </div>
 
                 {lessonEndedByTeacher ? (
-                  <div className="p-4 rounded-2xl bg-amber-950/80 border border-amber-500/50 space-y-2 text-center animate-fade-in shadow-xl">
-                    <div className="flex items-center justify-center gap-2 text-amber-300 font-extrabold text-sm">
-                      <CheckCircle2 className="w-5 h-5 text-amber-400" />
-                      <span>تم إنهاء الدرس وحفظ إجاباتك ودرجاتك بنجاح! 🏆</span>
+                  <div className="p-5 rounded-2xl bg-rose-950/80 border-2 border-rose-500/60 space-y-3 text-center animate-fade-in shadow-2xl">
+                    <div className="inline-flex items-center justify-center gap-2 px-3 py-1 rounded-full bg-rose-900/90 text-rose-200 font-extrabold text-xs">
+                      <LogOut className="w-4 h-4 text-rose-400" />
+                      <span>تم إنهاء الدرس وإخراجك من قِبل المعلم (إخراج إجباري) 🛑</span>
                     </div>
                     <div className="text-xs text-slate-200">
-                      درجتك المحفوظة: <strong className="text-amber-400 font-mono text-sm">{latestAccuracyRef.current || accuracy || 80}% إتقان</strong> ({Math.round((currentDrawing.points * (latestAccuracyRef.current || accuracy || 80)) / 100)} نقطة).
+                      تم حفظ نتيجتك ودرجتك في النظام: <strong className="text-amber-400 font-mono text-sm">{latestAccuracyRef.current || accuracy || 80}% إتقان</strong> ({Math.round((currentDrawing.points * (latestAccuracyRef.current || accuracy || 80)) / 100)} نقطة).
                     </div>
-                    <p className="text-[11px] text-slate-400 leading-relaxed">
-                      تم إخراجك من لوحة الرسم وتسجيل النتيجة في Google Sheets للمعلم. في انتظار أن يحدد المعلم درساً جديداً...
+                    <p className="text-[11px] text-slate-300 leading-relaxed bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
+                      قام المعلم بإنهاء الجلسة وإخراج الطلاب بالكامل لحفظ السجلات في Google Sheets. تم حذفك من قائمة الحضور النشطة.
                     </p>
-                    <button
-                      onClick={() => {
-                        setLessonEndedByTeacher(false);
-                        setFlowState('gate');
-                      }}
-                      className="mt-2 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 shadow-md cursor-pointer transition-transform active:scale-95"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>الانضمام لجلسة جديدة / تسجيل الدخول</span>
-                    </button>
+                    <div className="flex flex-col sm:flex-row items-center justify-center gap-2 pt-1">
+                      <button
+                        onClick={() => {
+                          setLessonEndedByTeacher(false);
+                          setStudentName('');
+                          setStudentNumber('');
+                          setFlowState('gate');
+                        }}
+                        className="w-full sm:w-auto px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs inline-flex items-center justify-center gap-1.5 shadow-md cursor-pointer transition-transform active:scale-95"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>الانضمام كطالب جديد / جلسة جديدة</span>
+                      </button>
+                      <button
+                        onClick={() => {
+                          window.location.href = '/';
+                        }}
+                        className="w-full sm:w-auto px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs inline-flex items-center justify-center gap-1.5 border border-slate-700 cursor-pointer"
+                      >
+                        <span>العودة للرئيسية</span>
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">

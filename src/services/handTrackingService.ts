@@ -20,6 +20,7 @@ export interface HandData {
 
   // 2-finger pinch (Thumb + Index) - For grabbing & moving items
   isPinching: boolean;
+  isTwoFingerOnlyPinch: boolean; // Pure two-finger pinch (Thumb + Index only; middle finger NOT clustered)
   pinchDistance: number;
   pinchRatio: number;
 
@@ -119,6 +120,7 @@ class HandTrackingService {
     pinkyTip: null,
     wrist: null,
     isPinching: false,
+    isTwoFingerOnlyPinch: false,
     pinchDistance: 1.0,
     pinchRatio: 1.0,
     isThreeFingerPinching: false,
@@ -574,7 +576,13 @@ class HandTrackingService {
       const isCurrentlyClose3 = threeFingerSpread < this.threeFingerOnThreshold && threeFingerRatio < this.threeFingerOnRatio;
 
       // When the 3 fingers spread apart explicitly (STOP condition ✋):
-      const isCurrentlyFar3 = threeFingerSpread > this.threeFingerOffThreshold || threeFingerRatio > this.threeFingerOffRatio;
+      // Only stops when fingers are clearly and visibly separated, preventing any mid-stroke accidental stop:
+      const isCurrentlyFar3 = (
+        threeFingerSpread > this.threeFingerOffThreshold &&
+        distIndexMiddle > 0.085 &&
+        distThumbMiddle > 0.085 &&
+        rawDistance > 0.12
+      ) || (threeFingerRatio > this.threeFingerOffRatio);
 
       if (this.currentThreeFingerState) {
         if (isCurrentlyFar3) {
@@ -595,6 +603,7 @@ class HandTrackingService {
             this.isLatched = true;
           }
         } else {
+          // Drawing remains locked ON even if a finger momentarily flickers or drops; only releases upon clear finger divergence
           if (isCurrentlyFar3) {
             this.isLatched = false;
           }
@@ -617,6 +626,14 @@ class HandTrackingService {
         this.isLatched = true;
       }
 
+      // Dedicated 2-finger-only pinch (Thumb + Index touching, Middle is NOT clustered):
+      // Prevents 3-finger drawing pen grip from triggering 2-finger button clicks!
+      const isTwoFingerOnlyPinch = this.currentPinchState && (
+        distIndexMiddle > 0.075 ||
+        distThumbMiddle > 0.085 ||
+        rawMiddle.y > Math.max(rawIndex.y, rawThumb.y) + 0.035
+      );
+
       // Active Draw Point: Resilient index tip
       const activeDrawPoint = { x: this.smoothedX, y: this.smoothedY };
 
@@ -624,7 +641,7 @@ class HandTrackingService {
       let gesture: 'pointing' | 'two_finger_pinch' | 'three_finger_pen' | 'open_hand' | 'fist' | 'no_hand' = 'open_hand';
       if (this.currentThreeFingerState || (this.isLatched && this.drawingGestureMode.includes('three_finger'))) {
         gesture = 'three_finger_pen';
-      } else if (this.currentPinchState && distIndexMiddle > 0.08) {
+      } else if (isTwoFingerOnlyPinch) {
         gesture = 'two_finger_pinch';
       } else {
         const isIndexExtended = rawIndex.y < (landmarks[6]?.y ?? 1.0);
@@ -644,6 +661,7 @@ class HandTrackingService {
         pinkyTip: { x: pinkyX, y: pinkyY },
         wrist: { x: wristX, y: wristY },
         isPinching: this.currentPinchState,
+        isTwoFingerOnlyPinch,
         pinchDistance: rawDistance,
         pinchRatio,
         isThreeFingerPinching: this.currentThreeFingerState,
@@ -687,6 +705,7 @@ class HandTrackingService {
       pinkyTip: null,
       wrist: null,
       isPinching: false,
+      isTwoFingerOnlyPinch: false,
       pinchDistance: 1.0,
       pinchRatio: 1.0,
       isThreeFingerPinching: false,
@@ -759,6 +778,7 @@ class HandTrackingService {
       pinkyTip: null,
       wrist: null,
       isPinching: false,
+      isTwoFingerOnlyPinch: false,
       pinchDistance: 1.0,
       pinchRatio: 1.0,
       isThreeFingerPinching: false,

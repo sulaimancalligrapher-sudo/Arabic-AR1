@@ -83,6 +83,9 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
   const lastButtonTriggerRef = useRef(0);
   const lastGesturePinchTimeRef = useRef(0);
   const dwellStartTimeRef = useRef<number | null>(null);
+  const airPinchStartTimeRef = useRef<number | null>(null);
+  const threeFingerJoinStartTimeRef = useRef<number | null>(null);
+  const pinchMustReleaseRef = useRef<boolean>(false);
   const handleToggleButtonSessionRef = useRef<() => void>(() => {});
 
   // Drawing state
@@ -271,6 +274,15 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
 
   // Unified Toggle: Start Drawing / Finish Drawing
   const handleToggleButtonSession = useCallback(() => {
+    const now = Date.now();
+    if (now - lastButtonTriggerRef.current < 2000) {
+      return; // Cooldown 2s to prevent rapid start/stop cycling
+    }
+    lastButtonTriggerRef.current = now;
+    dwellStartTimeRef.current = null;
+    airPinchStartTimeRef.current = null;
+    setDwellProgress(0);
+
     if (!isDrawingSessionActiveRef.current) {
       // 1. START SESSION
       isDrawingSessionActiveRef.current = true;
@@ -451,15 +463,24 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
       setIsHoveringButton(false);
     }
 
-    // Dwell detection when pointing at the button (1.2s hover activates button)
+    // Reset pinch release guard when student opens fingers
+    if (!data.isPinching) {
+      pinchMustReleaseRef.current = false;
+    }
+
+    const now = Date.now();
+    const canTriggerButton = (now - lastButtonTriggerRef.current > 2000) && !pinchMustReleaseRef.current;
+
+    // Interaction A: Over Action Button (Hovering or Pinching on Button for 1.0 second)
+    // As requested: "في السبابة و الابهام ملتصقتين تماما في ثانية مثلا على زر ابدا/ انهاء يعني كانه ينقر على الزر"
     if (isOverActionButton) {
       if (!dwellStartTimeRef.current) {
-        dwellStartTimeRef.current = Date.now();
+        dwellStartTimeRef.current = now;
       } else {
-        const elapsed = Date.now() - dwellStartTimeRef.current;
-        const progress = Math.min(100, Math.round((elapsed / 1200) * 100));
+        const elapsed = now - dwellStartTimeRef.current;
+        const progress = Math.min(100, Math.round((elapsed / 1000) * 100)); // Exactly 1.0s (1000ms)
         setDwellProgress(progress);
-        if (elapsed >= 1200) {
+        if (elapsed >= 1000 && canTriggerButton) {
           dwellStartTimeRef.current = null;
           setDwellProgress(0);
           setButtonClickFeedback(true);
@@ -470,37 +491,86 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
       }
     } else {
       dwellStartTimeRef.current = null;
-      setDwellProgress(0);
     }
 
-    // Click detection: 2-Finger Pinch (data.isPinching: Thumb + Index 🤏)
-    // Works either by pointing at the button OR pinching anywhere in the air!
-    if (data.isPinching) {
-      const now = Date.now();
-      if (now - lastGesturePinchTimeRef.current > 800) {
-        lastGesturePinchTimeRef.current = now;
-        dwellStartTimeRef.current = null;
-        setDwellProgress(0);
-        setButtonClickFeedback(true);
-        setTimeout(() => setButtonClickFeedback(false), 500);
-        audioService.playPopSound();
-        handleToggleButtonSessionRef.current();
+    // Interaction B: Air Pinch Gesture (Only when NOT over button)
+    // When session is NOT active: 2-finger pinch held for 1.0s starts session
+    // When session IS active: Air-pinch is disabled to completely prevent conflict with drawing!
+    if (!isOverActionButton) {
+      if (!isDrawingSessionActiveRef.current) {
+        if (data.isTwoFingerOnlyPinch && canTriggerButton) {
+          if (!airPinchStartTimeRef.current) {
+            airPinchStartTimeRef.current = now;
+          } else {
+            const elapsed = now - airPinchStartTimeRef.current;
+            const progress = Math.min(100, Math.round((elapsed / 1000) * 100)); // Exactly 1.0s (1000ms)
+            setDwellProgress(progress);
+            if (elapsed >= 1000) {
+              airPinchStartTimeRef.current = null;
+              setDwellProgress(0);
+              setButtonClickFeedback(true);
+              setTimeout(() => setButtonClickFeedback(false), 500);
+              audioService.playPopSound();
+              handleToggleButtonSessionRef.current();
+            }
+          }
+        } else {
+          airPinchStartTimeRef.current = null;
+          if (!isOverActionButton) {
+            setDwellProgress(0);
+          }
+        }
+      } else {
+        airPinchStartTimeRef.current = null;
       }
     }
 
     // 2. Determine if drawing is currently active:
     // Session MUST be active, and hand NOT over the button!
-    let isDrawing = false;
+    // As requested:
+    // "و في الرسم ثلاث اصابع الابهام و السبابة و الموسطى اذا اجتمع ثلاث اصابع في ثانية واحدة يبدا الرسم و لا يينتهي حتى اذا اختفى اصبع اما الكاميرا لا يتوقف الرسم .. اذا تباعد الاصبع بوضوح يتوقف الرسم"
+    let isDrawing = isPenDownRef.current;
     if (isDrawingSessionActiveRef.current && !isOverActionButton) {
-      if (currentMode === 'three_finger_latch' || currentMode === 'two_finger_latch') {
-        isDrawing = !!data.isLatched;
-      } else if (currentMode === 'three_finger') {
-        isDrawing = !!data.isThreeFingerPinching;
-      } else if (currentMode === 'two_finger') {
-        isDrawing = !!data.isPinching;
+      if (!isPenDownRef.current) {
+        // Condition to START drawing: 3 fingers meet in pen grip
+        const isThreeFingersTogether = (
+          data.isThreeFingerPinching ||
+          data.isLatched ||
+          (data.threeFingerSpread < 0.085 && data.threeFingerRatio < 0.45)
+        );
+
+        if (isThreeFingersTogether) {
+          if (!threeFingerJoinStartTimeRef.current) {
+            threeFingerJoinStartTimeRef.current = now;
+          } else {
+            const elapsed = now - threeFingerJoinStartTimeRef.current;
+            if (elapsed >= 350) { // Gathered and stabilized
+              isDrawing = true;
+              threeFingerJoinStartTimeRef.current = null;
+            }
+          }
+        } else {
+          threeFingerJoinStartTimeRef.current = null;
+        }
       } else {
-        isDrawing = true;
+        // While DRAWING:
+        // Drawing remains locked ON! Even if one finger momentarily flickers or drops, drawing continues!
+        // ONLY stops when fingers are CLEARLY and WIDELY spread apart:
+        const isFingersClearlySeparated = (
+          data.threeFingerSpread > 0.12 &&
+          data.pinchDistance > 0.14
+        ) || data.gesture === 'open_hand';
+
+        if (isFingersClearlySeparated) {
+          isDrawing = false;
+          threeFingerJoinStartTimeRef.current = null;
+        } else {
+          isDrawing = true; // Maintain stroke continuity
+        }
       }
+    } else {
+      isDrawing = false;
+      threeFingerJoinStartTimeRef.current = null;
     }
 
     // Trigger state change & subtle tactile chime on pen down
@@ -510,6 +580,8 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
       if (isDrawing) {
         audioService.playChime();
         lastDrawPosRef.current = null; // Clean start for new stroke
+      } else {
+        lastDrawPosRef.current = null;
       }
     }
 
@@ -795,27 +867,31 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
               </div>
             )}
 
-            {/* Input Device Switch */}
-            <div className="flex items-center bg-slate-900 p-0.5 rounded-lg border border-slate-700">
+            {/* Input Device Switch: 1. Hand Tracking, 2. Mouse / Finger Touch */}
+            <div className="flex items-center bg-slate-950 p-1 rounded-2xl border border-slate-700/90 shadow-inner">
               <button
                 onClick={() => setInputMode('ar_hand')}
-                className={`p-1.5 text-xs rounded-md flex items-center gap-1 transition-colors ${
-                  inputMode === 'ar_hand' ? 'bg-amber-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-white'
+                className={`px-3 py-1.5 text-xs rounded-xl flex items-center gap-1.5 transition-all font-bold cursor-pointer ${
+                  inputMode === 'ar_hand'
+                    ? 'bg-amber-500 text-slate-950 shadow-md ring-2 ring-amber-400/30'
+                    : 'text-slate-400 hover:text-white'
                 }`}
-                title="تتبع حركة اليد والكاميرا"
+                title="النوع الأول: تتبع حركة اليد عبر الكاميرا"
               >
-                <Camera className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">الكاميرا</span>
+                <span className="text-sm">✋</span>
+                <span>تتبع اليد</span>
               </button>
               <button
                 onClick={() => setInputMode('mouse_touch')}
-                className={`p-1.5 text-xs rounded-md flex items-center gap-1 transition-colors ${
-                  inputMode === 'mouse_touch' ? 'bg-amber-500 text-slate-950 font-bold' : 'text-slate-400 hover:text-white'
+                className={`px-3 py-1.5 text-xs rounded-xl flex items-center gap-1.5 transition-all font-bold cursor-pointer ${
+                  inputMode === 'mouse_touch'
+                    ? 'bg-amber-500 text-slate-950 shadow-md ring-2 ring-amber-400/30'
+                    : 'text-slate-400 hover:text-white'
                 }`}
-                title="الماوس أو شاشة اللمس"
+                title="النوع الثاني: الرسم بالفأرة أو لمس الشاشة بالإصبع"
               >
-                <MousePointer className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">ماوس / لمس</span>
+                <span className="text-sm">🖱️</span>
+                <span>فأرة / لمس</span>
               </button>
             </div>
           </div>
