@@ -189,15 +189,13 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
   const handleRemoteEndLessonAndExit = () => {
     whiteboardSyncService.sendEndLessonAndExit(targetStudentId);
     setIsBoardSessionActive(false);
-    // Mark connected students as finished
+    // Force delete student(s) from connected list immediately (حذف وإخراج إجباري من النظام)
     setConnectedStudents(prev =>
-      prev.map(s =>
-        targetStudentId === 'all' || s.id === targetStudentId
-          ? { ...s, status: 'finished' }
-          : s
-      )
+      targetStudentId === 'all'
+        ? []
+        : prev.filter(s => s.id !== targetStudentId)
     );
-    setCopiedFeedback('تم إنهاء الدرس بنجاح، حفظ درجات جميع الطلاب في Google Sheets، وإخراجهم من لوحة الرسم! 🛑');
+    setCopiedFeedback('تم إنهاء الدرس بنجاح، حذف وإخراج الطلاب من النظام فوراً وحفظ درجاتهم! 🛑');
     setTimeout(() => setCopiedFeedback(null), 5000);
   };
 
@@ -812,12 +810,26 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
                       </div>
 
                       <div className="mt-2 pt-2 border-t border-slate-900 flex items-center justify-between text-[10px]">
-                        <button
-                          onClick={() => setTargetStudentId(std.id)}
-                          className="text-amber-400 hover:text-amber-300 font-bold"
-                        >
-                          {targetStudentId === std.id ? '✓ محدد حالياً' : 'تحديد هذا الطالب 🎯'}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setTargetStudentId(std.id)}
+                            className="text-amber-400 hover:text-amber-300 font-bold"
+                          >
+                            {targetStudentId === std.id ? '✓ محدد حالياً' : 'تحديد 🎯'}
+                          </button>
+                          <button
+                            onClick={() => {
+                              whiteboardSyncService.removeStudent(std.id);
+                              setConnectedStudents(prev => prev.filter(s => s.id !== std.id));
+                              setCopiedFeedback(`تم حذف وإخراج الطالب «${std.name}» من النظام! 🛑`);
+                              setTimeout(() => setCopiedFeedback(null), 3000);
+                            }}
+                            className="text-rose-400 hover:text-rose-300 font-bold hover:underline"
+                            title="حذف وإخراج هذا الطالب إجبارياً من النظام"
+                          >
+                            إخراج ✕
+                          </button>
+                        </div>
                         {std.score > 0 && (
                           <span className="text-amber-300 font-bold">+{std.score} نقطة</span>
                         )}

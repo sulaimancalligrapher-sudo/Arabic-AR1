@@ -135,9 +135,12 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
 
   // In-canvas button tracking
   const [isHoveringButton, setIsHoveringButton] = useState(false);
+  const [dwellProgress, setDwellProgress] = useState(0);
   const [buttonFeedback, setButtonFeedback] = useState(false);
   const actionButtonRef = useRef<HTMLButtonElement | null>(null);
   const lastButtonTriggerRef = useRef(0);
+  const lastGesturePinchTimeRef = useRef(0);
+  const dwellStartTimeRef = useRef<number | null>(null);
 
   // Canvases and container refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -318,6 +321,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
         if (msg.type === 'END_LESSON_AND_EXIT') {
           setLessonEndedByTeacher(true);
           audioService.speakArabic('انتهى الدرس من قِبل المعلم! تم حفظ نتيجتك ودرجاتك بنجاح');
+          whiteboardSyncService.disconnectStudent();
         }
         // Exit student from active drawing canvas and show completed score card in waiting flow
         setFlowState('waiting');
@@ -530,9 +534,9 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     });
   };
 
-  const handleToggleButton = useCallback(() => {
+  const handleToggleButton = useCallback((force = false) => {
     const now = Date.now();
-    if (now - lastButtonTriggerRef.current < 500) {
+    if (!force && now - lastButtonTriggerRef.current < 400) {
       return;
     }
     lastButtonTriggerRef.current = now;
@@ -542,7 +546,7 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
     } else {
       finishDrawingSession();
     }
-  }, []);
+  }, [finishDrawingSession, startDrawingSession]);
 
   // Flush pending throttled accuracy / score updates immediately (e.g. on stroke end or finish)
   const flushAccuracyUpdate = useCallback(() => {
@@ -808,12 +812,12 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       const screenPos = getScreenCoordinatesFromNormalized(data.indexTip.x, data.indexTip.y);
 
       if (screenPos) {
-        // Generous padding around the button (35px)
+        // Generous padding around the button (45px)
         isOverButton = (
-          screenPos.screenX >= btnRect.left - 35 &&
-          screenPos.screenX <= btnRect.right + 35 &&
-          screenPos.screenY >= btnRect.top - 35 &&
-          screenPos.screenY <= btnRect.bottom + 35
+          screenPos.screenX >= btnRect.left - 45 &&
+          screenPos.screenX <= btnRect.right + 45 &&
+          screenPos.screenY >= btnRect.top - 45 &&
+          screenPos.screenY <= btnRect.bottom + 45
         );
       }
       setIsHoveringButton(isOverButton);
@@ -821,15 +825,41 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
       setIsHoveringButton(false);
     }
 
+    // Dwell detection when pointing at the button (1.2 seconds hold activates button effortlessly)
+    if (isOverButton) {
+      if (!dwellStartTimeRef.current) {
+        dwellStartTimeRef.current = Date.now();
+      } else {
+        const elapsed = Date.now() - dwellStartTimeRef.current;
+        const progress = Math.min(100, Math.round((elapsed / 1200) * 100));
+        setDwellProgress(progress);
+        if (elapsed >= 1200) {
+          dwellStartTimeRef.current = null;
+          setDwellProgress(0);
+          setButtonFeedback(true);
+          setTimeout(() => setButtonFeedback(false), 500);
+          audioService.playPopSound();
+          handleToggleButton(true);
+        }
+      }
+    } else {
+      dwellStartTimeRef.current = null;
+      setDwellProgress(0);
+    }
+
     // 2-Finger Pinch Click on Button (حركة إصبعين 🤏 للبدء والإنهاء في وضع اليد):
     // When in Hand Tracking mode:
     // If student pinches two fingers (thumb + index 🤏) either anywhere in the camera view OR pointing at the button:
     if (inputMethodRef.current === 'hand' && data.isPinching) {
       const now = Date.now();
-      if (now - lastButtonTriggerRef.current > 750) {
-        lastButtonTriggerRef.current = now;
+      if (now - lastGesturePinchTimeRef.current > 800) {
+        lastGesturePinchTimeRef.current = now;
+        dwellStartTimeRef.current = null;
+        setDwellProgress(0);
+        setButtonFeedback(true);
+        setTimeout(() => setButtonFeedback(false), 500);
         audioService.playPopSound();
-        handleToggleButton();
+        handleToggleButton(true); // Force execute without cooldown blockage!
       }
     }
 
@@ -1330,46 +1360,62 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
 
           {/* Interactive In-Canvas Button (Start / Finish Session - Single word with icon) */}
           {flowState === 'drawing' && (
-            <button
-              ref={actionButtonRef}
-              type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                handleToggleButton();
-              }}
-              className={`absolute top-3 sm:top-4 right-3 sm:right-4 z-50 pointer-events-auto px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-2xl border-2 flex items-center gap-2 transition-all duration-200 cursor-pointer shadow-2xl backdrop-blur-md select-none ${
-                buttonFeedback
-                  ? 'scale-95 ring-8 ring-amber-400 bg-amber-400 text-slate-950'
-                  : !isSessionActive
-                  ? isHoveringButton
-                    ? 'bg-emerald-900/95 border-emerald-400 text-emerald-100 scale-105 ring-4 ring-emerald-400/60 shadow-emerald-500/40 animate-pulse'
-                    : 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200 hover:bg-emerald-900/90'
-                  : isHoveringButton
-                  ? 'bg-rose-900/95 border-rose-400 text-rose-100 scale-105 ring-4 ring-rose-400/60 shadow-rose-500/40 animate-pulse'
-                  : 'bg-rose-950/90 border-rose-500/80 text-rose-200 hover:bg-rose-900/90'
-              }`}
-            >
-              {!isSessionActive ? (
-                <>
-                  <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-xl bg-emerald-500 text-slate-950 flex items-center justify-center font-bold shadow shrink-0">
-                    <Play className="w-3.5 h-3.5 sm:w-4 sm:h-4 fill-current ml-0.5" />
-                  </div>
-                  <span className="text-xs sm:text-sm font-black text-emerald-100 leading-none">
-                    ابدأ
-                  </span>
-                </>
-              ) : (
-                <>
-                  <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-xl bg-rose-500 text-white flex items-center justify-center font-bold shadow shrink-0">
-                    <CheckCircle2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                  </div>
-                  <span className="text-xs sm:text-sm font-black text-rose-100 leading-none">
-                    إنهاء
-                  </span>
-                </>
+            <div className="absolute top-3 sm:top-4 right-3 sm:right-4 z-50 flex flex-col items-end gap-1.5 pointer-events-auto">
+              <button
+                ref={actionButtonRef}
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleToggleButton();
+                }}
+                className={`relative overflow-hidden px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-2xl border-2 flex items-center gap-2 transition-all duration-200 cursor-pointer shadow-2xl backdrop-blur-md select-none ${
+                  buttonFeedback
+                    ? 'scale-95 ring-8 ring-amber-400 bg-amber-400 text-slate-950'
+                    : !isSessionActive
+                    ? isHoveringButton
+                      ? 'bg-emerald-900/95 border-emerald-400 text-emerald-100 scale-105 ring-4 ring-emerald-400/60 shadow-emerald-500/40 animate-pulse'
+                      : 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200 hover:bg-emerald-900/90'
+                    : isHoveringButton
+                    ? 'bg-rose-900/95 border-rose-400 text-rose-100 scale-105 ring-4 ring-rose-400/60 shadow-rose-500/40 animate-pulse'
+                    : 'bg-rose-950/90 border-rose-500/80 text-rose-200 hover:bg-rose-900/90'
+                }`}
+              >
+                {/* Dwell Progress bar */}
+                {dwellProgress > 0 && (
+                  <div
+                    className="absolute inset-x-0 bottom-0 h-1.5 bg-amber-400 transition-all duration-75"
+                    style={{ width: `${dwellProgress}%` }}
+                  />
+                )}
+                {!isSessionActive ? (
+                  <>
+                    <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-xl bg-emerald-500 text-slate-950 flex items-center justify-center font-bold shadow shrink-0">
+                      <Play className="w-3.5 h-3.5 sm:w-4 sm:h-4 fill-current ml-0.5" />
+                    </div>
+                    <span className="text-xs sm:text-sm font-black text-emerald-100 leading-none">
+                      ابدأ
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-xl bg-rose-500 text-white flex items-center justify-center font-bold shadow shrink-0">
+                      <CheckCircle2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                    </div>
+                    <span className="text-xs sm:text-sm font-black text-rose-100 leading-none">
+                      إنهاء
+                    </span>
+                  </>
+                )}
+              </button>
+
+              {/* Hand Mode Hint badge */}
+              {inputMethod === 'hand' && (
+                <div className="px-2.5 py-1 rounded-xl bg-slate-900/95 border border-slate-700/80 text-[11px] text-amber-300 font-bold backdrop-blur-md shadow-lg flex items-center gap-1.5 select-none animate-in fade-in duration-150">
+                  <span>ضم إصبعين 🤏 في الهواء أو أشر للزر</span>
+                </div>
               )}
-            </button>
+            </div>
           )}
 
           {/* Smart Latch Drawing Status Badge */}
@@ -1443,6 +1489,16 @@ export const StudentWhiteboardView: React.FC<StudentWhiteboardViewProps> = ({
                     <p className="text-[11px] text-slate-400 leading-relaxed">
                       تم إخراجك من لوحة الرسم وتسجيل النتيجة في Google Sheets للمعلم. في انتظار أن يحدد المعلم درساً جديداً...
                     </p>
+                    <button
+                      onClick={() => {
+                        setLessonEndedByTeacher(false);
+                        setFlowState('gate');
+                      }}
+                      className="mt-2 px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 shadow-md cursor-pointer transition-transform active:scale-95"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>الانضمام لجلسة جديدة / تسجيل الدخول</span>
+                    </button>
                   </div>
                 ) : (
                   <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">

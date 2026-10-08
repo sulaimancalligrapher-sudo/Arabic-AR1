@@ -538,13 +538,59 @@ class WhiteboardSyncService {
   }
 
   /**
-   * Teacher helper: End the current lesson, save student grades, and exit students from drawing canvas
+   * Teacher helper: End the current lesson, save student grades, and forcefully exit and delete students from the system
    */
   public sendEndLessonAndExit(targetStudentId: string = 'all') {
     this.send({
       type: 'END_LESSON_AND_EXIT',
-      targetStudentId
+      targetStudentId,
+      payload: {
+        forceExit: true
+      }
     });
+
+    // Forceful eviction: remove student(s) from system immediately
+    if (targetStudentId === 'all') {
+      this.connectedStudents.clear();
+    } else {
+      this.connectedStudents.delete(targetStudentId);
+    }
+    this.notifyStudentListeners();
+  }
+
+  /**
+   * Teacher helper: Remove / kick an individual student from the system
+   */
+  public removeStudent(studentId: string) {
+    this.send({
+      type: 'END_LESSON_AND_EXIT',
+      targetStudentId: studentId,
+      payload: { forceExit: true }
+    });
+    this.connectedStudents.delete(studentId);
+    this.notifyStudentListeners();
+  }
+
+  /**
+   * Student helper: Disconnect student and stop heartbeats completely upon exit/kick
+   */
+  public disconnectStudent() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    if (this.currentRole === 'student' && this.currentStudentInfo) {
+      try {
+        this.send({
+          type: 'STUDENT_LEAVE',
+          studentId: this.currentStudentInfo.id,
+          studentName: this.currentStudentInfo.name
+        });
+      } catch {
+        // Ignore
+      }
+      this.currentStudentInfo = null;
+    }
   }
 
   /**

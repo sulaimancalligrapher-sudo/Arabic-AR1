@@ -77,9 +77,12 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
 
   // In-Canvas Virtual Action Button Hand Tracking
   const [isHoveringButton, setIsHoveringButton] = useState(false);
+  const [dwellProgress, setDwellProgress] = useState(0);
   const [buttonClickFeedback, setButtonClickFeedback] = useState(false);
   const actionButtonRef = useRef<HTMLButtonElement | null>(null);
   const lastButtonTriggerRef = useRef(0);
+  const lastGesturePinchTimeRef = useRef(0);
+  const dwellStartTimeRef = useRef<number | null>(null);
   const handleToggleButtonSessionRef = useRef<() => void>(() => {});
 
   // Drawing state
@@ -108,7 +111,7 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
 
   // State Refs to prevent 60FPS loop stale closures
   const isPenDownRef = useRef(false);
-  const gestureModeRef = useRef<DrawingGestureMode>('three_finger');
+  const gestureModeRef = useRef<DrawingGestureMode>('three_finger_latch');
   gestureModeRef.current = gestureMode;
 
   // Analysis Mask
@@ -178,6 +181,12 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
       mounted = false;
     };
   }, [drawing.id, drawing.imageUrl]);
+
+  // Synchronize gesture mode and sensitivity with handTrackingService
+  useEffect(() => {
+    handTrackingService.setDrawingGestureMode(gestureMode);
+    handTrackingService.setSensitivity(sensitivity);
+  }, [gestureMode, sensitivity]);
 
   // Setup AR Camera
   useEffect(() => {
@@ -410,16 +419,31 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
       const cvs = skeletonCanvasRef.current || userDrawCanvasRef.current;
       if (cvs) {
         const cvsRect = cvs.getBoundingClientRect();
-        // Normalized hand coordinate mapped to screen client rect
-        const tipScreenX = cvsRect.left + data.indexTip.x * cvsRect.width;
-        const tipScreenY = cvsRect.top + data.indexTip.y * cvsRect.height;
+        const canvasAspect = (cvs.width || 700) / (cvs.height || 520);
+        const rectAspect = cvsRect.width / cvsRect.height;
+        let actualW = cvsRect.width;
+        let actualH = cvsRect.height;
+        let offsetX = 0;
+        let offsetY = 0;
+        if (canvasAspect > rectAspect) {
+          actualW = cvsRect.width;
+          actualH = cvsRect.width / canvasAspect;
+          offsetY = (cvsRect.height - actualH) / 2;
+        } else {
+          actualH = cvsRect.height;
+          actualW = cvsRect.height * canvasAspect;
+          offsetX = (cvsRect.width - actualW) / 2;
+        }
 
-        // Generous touch margin of 35px around the button
+        const tipScreenX = cvsRect.left + offsetX + data.indexTip.x * actualW;
+        const tipScreenY = cvsRect.top + offsetY + data.indexTip.y * actualH;
+
+        // Generous touch margin of 45px around the button
         isOverActionButton = (
-          tipScreenX >= btnRect.left - 35 &&
-          tipScreenX <= btnRect.right + 35 &&
-          tipScreenY >= btnRect.top - 35 &&
-          tipScreenY <= btnRect.bottom + 35
+          tipScreenX >= btnRect.left - 45 &&
+          tipScreenX <= btnRect.right + 45 &&
+          tipScreenY >= btnRect.top - 45 &&
+          tipScreenY <= btnRect.bottom + 45
         );
       }
       setIsHoveringButton(isOverActionButton);
@@ -427,12 +451,38 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
       setIsHoveringButton(false);
     }
 
+    // Dwell detection when pointing at the button (1.2s hover activates button)
+    if (isOverActionButton) {
+      if (!dwellStartTimeRef.current) {
+        dwellStartTimeRef.current = Date.now();
+      } else {
+        const elapsed = Date.now() - dwellStartTimeRef.current;
+        const progress = Math.min(100, Math.round((elapsed / 1200) * 100));
+        setDwellProgress(progress);
+        if (elapsed >= 1200) {
+          dwellStartTimeRef.current = null;
+          setDwellProgress(0);
+          setButtonClickFeedback(true);
+          setTimeout(() => setButtonClickFeedback(false), 500);
+          audioService.playPopSound();
+          handleToggleButtonSessionRef.current();
+        }
+      }
+    } else {
+      dwellStartTimeRef.current = null;
+      setDwellProgress(0);
+    }
+
     // Click detection: 2-Finger Pinch (data.isPinching: Thumb + Index 🤏)
     // Works either by pointing at the button OR pinching anywhere in the air!
     if (data.isPinching) {
       const now = Date.now();
-      if (now - lastButtonTriggerRef.current > 750) {
-        lastButtonTriggerRef.current = now;
+      if (now - lastGesturePinchTimeRef.current > 800) {
+        lastGesturePinchTimeRef.current = now;
+        dwellStartTimeRef.current = null;
+        setDwellProgress(0);
+        setButtonClickFeedback(true);
+        setTimeout(() => setButtonClickFeedback(false), 500);
         audioService.playPopSound();
         handleToggleButtonSessionRef.current();
       }
@@ -916,7 +966,7 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
           ref={actionButtonRef}
           type="button"
           onClick={handleToggleButtonSession}
-          className={`absolute top-4 right-4 sm:top-5 sm:right-6 z-40 px-4 py-2.5 rounded-2xl border-2 flex items-center gap-3 transition-all duration-200 cursor-pointer shadow-2xl backdrop-blur-md select-none ${
+          className={`absolute top-4 right-4 sm:top-5 sm:right-6 z-40 relative overflow-hidden px-4 py-2.5 rounded-2xl border-2 flex items-center gap-3 transition-all duration-200 cursor-pointer shadow-2xl backdrop-blur-md select-none ${
             buttonClickFeedback
               ? 'scale-95 ring-8 ring-amber-400/80 bg-amber-400 text-slate-950'
               : !isDrawingSessionActive
@@ -933,6 +983,13 @@ export const ARDrawingCanvas: React.FC<ARDrawingCanvasProps> = ({
               : 'اضغط بالماوس أو اقبض بإصبعين 🤏 لإنهاء الرسم وحساب النتيجة'
           }
         >
+          {/* Dwell Progress bar */}
+          {dwellProgress > 0 && (
+            <div
+              className="absolute inset-x-0 bottom-0 h-1.5 bg-amber-400 transition-all duration-75"
+              style={{ width: `${dwellProgress}%` }}
+            />
+          )}
           {/* Status Icon */}
           <div
             className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-inner ${

@@ -527,8 +527,18 @@ class HandTrackingService {
       const rawDistance = Math.sqrt(dxThumbIndex * dxThumbIndex + dyThumbIndex * dyThumbIndex);
       const pinchRatio = rawDistance / palmWidth;
 
-      const isCurrentlyClose2 = rawDistance < 0.12 || pinchRatio < 0.72;
-      const isCurrentlyFar2 = rawDistance > 0.16 && pinchRatio > 0.95;
+      // Direct Euclidean distance between thumb tip and index tip
+      const directTipDistance = Math.hypot(thumbX - targetX, thumbY - targetY);
+
+      const isCurrentlyClose2 =
+        rawDistance < 0.135 ||
+        directTipDistance < 0.11 ||
+        pinchRatio < 0.82;
+
+      const isCurrentlyFar2 =
+        rawDistance > 0.175 &&
+        directTipDistance > 0.14 &&
+        pinchRatio > 0.98;
 
       if (this.currentPinchState) {
         if (isCurrentlyFar2) {

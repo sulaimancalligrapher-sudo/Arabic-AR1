@@ -1,6 +1,7 @@
 import React from 'react';
 import { StudentProfile, ActivityResult, Lesson } from '../types';
-import { Award, Star, CheckCircle2, Flame, Download, Table, RefreshCw, Clock, Sparkles } from 'lucide-react';
+import { Award, Star, CheckCircle2, Flame, Download, Table, RefreshCw, Clock, Sparkles, Palette } from 'lucide-react';
+import { googleSheetsService } from '../services/googleSheetsService';
 
 interface StudentProgressViewProps {
   student: StudentProfile;
@@ -216,6 +217,72 @@ export const StudentProgressView: React.FC<StudentProgressViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Drawing and Letter Tracing History (Google Sheets ورقة_الرسم) */}
+      {(() => {
+        const drawingHistory = googleSheetsService.getDrawingHistory();
+        return (
+          <div className="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Palette className="w-5 h-5 text-emerald-400" />
+                <div>
+                  <h3 className="text-base font-bold text-white font-serif">
+                    سجل رسم الحروف والأشكال والسبورة (ورقة_الرسم)
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    درجات إتقان الطلاب ونسب الدقة المسجلة تلقائياً ومزامنة مع Google Sheets
+                  </p>
+                </div>
+              </div>
+              <span className="text-xs font-mono font-bold text-slate-400 bg-slate-800 px-3 py-1 rounded-xl">
+                {drawingHistory.length} محاولات مسجلة
+              </span>
+            </div>
+
+            {drawingHistory.length === 0 ? (
+              <div className="py-10 text-center text-slate-500 text-xs">
+                لم يتم تسجيل أي رسومات أو أحرف حتى الآن. توجه إلى قسم «استوديو الرسم» وابدأ التمرن أمام الكاميرا!
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-right text-xs">
+                  <thead className="bg-slate-800/80 text-slate-400 border-b border-slate-700">
+                    <tr>
+                      <th className="p-3">التاريخ والوقت</th>
+                      <th className="p-3">اسم الدرس / الحرف</th>
+                      <th className="p-3">نوع التمرين</th>
+                      <th className="p-3">نسبة الإتقان</th>
+                      <th className="p-3">النقاط</th>
+                      <th className="p-3">المدة</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {drawingHistory.map((rec) => (
+                      <tr key={rec.id} className="hover:bg-slate-800/40">
+                        <td className="p-3 font-mono text-slate-400">
+                          {new Date(rec.timestamp).toLocaleTimeString('ar-SA')}
+                        </td>
+                        <td className="p-3 font-bold text-white font-serif">{rec.drawingTitle}</td>
+                        <td className="p-3">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] bg-slate-800 text-slate-300 border border-slate-700">
+                            {rec.mode === 'color' ? '🎨 تلوين' : '✍️ تتبع مسار'}
+                          </span>
+                        </td>
+                        <td className="p-3 font-mono text-emerald-400 font-bold">
+                          {rec.accuracy}%
+                        </td>
+                        <td className="p-3 font-mono text-amber-400 font-bold">+{rec.score}</td>
+                        <td className="p-3 font-mono text-slate-400">{rec.durationSeconds} ثانية</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
     </div>
   );
